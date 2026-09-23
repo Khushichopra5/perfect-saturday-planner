@@ -2,7 +2,7 @@
 
 Run locally with::
 
-    uvicorn planner.main:app --reload
+    python -m uvicorn planner.main:app --reload
 
 or::
 
@@ -19,24 +19,21 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict
 
 from . import __version__, llm
-from .agent import parse_payload, run_agent_from_prefs, run_agent_safe
+from .agent import parse_payload, run_agent_from_prefs_safe, run_agent_safe
+
+try:  # optional: load a local .env if python-dotenv is installed
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:  # pragma: no cover
+    pass
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(title="Perfect Saturday Planner", version=__version__)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
-
-class PlanRequest(BaseModel):
-    """Accepts either free text (``input``) or the structured brief shape."""
-
-    model_config = ConfigDict(extra="allow")
-
-    input: str | None = None
-    force: bool = False
 
 
 def _sse(event: dict[str, Any]) -> str:
@@ -77,12 +74,14 @@ async def plan(request: Request) -> StreamingResponse | JSONResponse:
     text, prefs = parse_payload(payload)
 
     if text is None and prefs is None:
-        return JSONResponse({"error": "Please describe your Saturday first."}, status_code=400)
+        if not force:
+            return JSONResponse({"error": "Please describe your Saturday first."}, status_code=400)
+        text = ""  # "plan anyway" with an empty box -> use sensible defaults
 
     events = (
         run_agent_safe(text, force, simulate_outage)
         if text is not None
-        else run_agent_from_prefs(prefs, force, simulate_outage)  # type: ignore[arg-type]
+        else run_agent_from_prefs_safe(prefs, force, simulate_outage)  # type: ignore[arg-type]
     )
     return StreamingResponse(
         _stream(events),

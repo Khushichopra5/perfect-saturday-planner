@@ -1,11 +1,25 @@
-from planner.models import PlaceCandidate
+import planner.tools.places as places_mod
+from planner.models import FOOD_CATEGORIES, PlaceCandidate
 from planner.tools.places import (
+    GeoLocation,
     _derive_category,
     _diversify,
     _nominatim_pois,
     geocode_city,
+    get_activity_options,
+    get_food_options,
     score_candidates,
 )
+
+GEO = GeoLocation(name="Testville", lat=12.9716, lon=77.5946, currency="INR", source="osm")
+
+
+def _element(element_id, name, tags, lat=12.9716, lon=77.5946):
+    return {"id": element_id, "tags": {"name": name, **tags}, "lat": lat, "lon": lon}
+
+
+def _poi(poi_id, name, tags, lat=12.9716, lon=77.5946):
+    return {"id": poi_id, "name": name, "tags": tags, "lat": lat, "lon": lon}
 
 
 def test_derive_category_known_tags():
@@ -61,3 +75,79 @@ async def test_geocode_unknown_city_offline_returns_none():
 
 async def test_nominatim_fallback_is_disabled_offline():
     assert await _nominatim_pois("Bangalore", ["park"]) == []
+
+
+async def test_activity_options_filter_out_eating_venues(monkeypatch):
+    elements = [
+        _element(1, "Pasta Palace", {"amenity": "restaurant"}),
+        _element(2, "Bean There Cafe", {"amenity": "cafe"}),
+        _element(3, "Quick Bites", {"amenity": "fast_food"}),
+        _element(4, "Cubbon Park", {"leisure": "park"}),
+        _element(5, "City Museum", {"tourism": "museum"}),
+    ]
+
+    async def fake_overpass(query):
+        return elements
+
+    monkeypatch.setattr(places_mod, "_overpass", fake_overpass)
+    result = await get_activity_options(GEO, ["food", "walks", "art"], [], False)
+
+    assert result.items
+    assert not ({c.category for c in result.items} & FOOD_CATEGORIES)
+    names = {c.name for c in result.items}
+    assert "Cubbon Park" in names
+    assert "City Museum" in names
+    assert "Pasta Palace" not in names
+    assert "Bean There Cafe" not in names
+
+
+async def test_activity_provider_is_nominatim_when_overpass_fails(monkeypatch):
+    async def failing_overpass(query):
+        raise RuntimeError("overpass down")
+
+    async def fake_pois(city, terms, limit=20):
+        return [
+            _poi(10, "Quiet Park", {"leisure": "park"}),
+            _poi(11, "City Museum", {"tourism": "museum"}),
+        ]
+
+    monkeypatch.setattr(places_mod, "_overpass", failing_overpass)
+    monkeypatch.setattr(places_mod, "_nominatim_pois", fake_pois)
+
+    result = await get_activity_options(GEO, ["walks", "art"], [], False)
+    assert result.provider == "nominatim"
+    assert {c.name for c in result.items} == {"Quiet Park", "City Museum"}
+
+
+async def test_activity_provider_is_overpass_when_it_returns_elements(monkeypatch):
+    elements = [
+        _element(1, "Cubbon Park", {"leisure": "park"}),
+        _element(2, "Lalbagh Garden", {"leisure": "garden"}),
+    ]
+
+    async def fake_overpass(query):
+        return elements
+
+    monkeypatch.setattr(places_mod, "_overpass", fake_overpass)
+    result = await get_activity_options(GEO, ["walks", "nature"], [], False)
+    assert result.provider == "overpass"
+    assert len(result.items) >= 2
+
+
+async def test_food_options_keep_only_food_categories(monkeypatch):
+    elements = [
+        _element(1, "Corner Bar", {"amenity": "bar"}),
+        _element(2, "Veg Kitchen", {"amenity": "restaurant", "cuisine": "vegetarian"}),
+    ]
+
+    async def fake_overpass(query):
+        return elements
+
+    monkeypatch.setattr(places_mod, "_overpass", fake_overpass)
+    result = await get_food_options(GEO, vegetarian=False, avoid_crowded=False)
+
+    assert result.items
+    assert all(c.category in FOOD_CATEGORIES for c in result.items)
+    names = {c.name for c in result.items}
+    assert "Veg Kitchen" in names
+    assert "Corner Bar" not in names

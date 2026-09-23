@@ -15,7 +15,7 @@ import re
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from ..models import Interest, PlaceCandidate, Plan, PlanItem, PlanItemKind, Preferences
+from ..models import FOOD_CATEGORIES, Interest, PlaceCandidate, Plan, PlanItem, PlanItemKind, Preferences
 from .cost import estimate_item_cost, format_money
 from .geo import haversine_km, nearest_neighbour_order, travel_minutes
 from .hours import opening_status
@@ -144,9 +144,10 @@ def _make_item(candidate: PlaceCandidate, kind: PlanItemKind, start_minutes: int
         candidate.category,
         *candidate.interests,
         "crowded" if candidate.crowd == "high" else ("moderately-busy" if candidate.crowd == "medium" else "quiet"),
-        "vegetarian-friendly" if candidate.vegetarian_friendly else "not-vegetarian",
         "live-data" if candidate.source == "osm" else "curated",
     ]
+    if kind == "food" or candidate.category in FOOD_CATEGORIES:
+        tags.append("vegetarian-friendly" if candidate.vegetarian_friendly else "not-vegetarian")
     description = candidate.category.capitalize() + (f" · {candidate.address}" if candidate.address else "")
     hours = candidate.tags.get("opening_hours")
     note = candidate.note
@@ -179,7 +180,11 @@ def _choose_activities(activities: list[PlaceCandidate], prefs: Preferences, cou
     """
     if count <= 0:
         return []
-    wanted = set(prefs.interests)
+    # Food is handled by the dedicated food tool, so don't let a "food" activity
+    # win a slot at the expense of music/walks/etc.
+    wanted = set(prefs.interests) - {"food", "coffee"}
+    if not wanted:
+        wanted = set(prefs.interests)
     chosen: list[PlaceCandidate] = []
     remaining = list(activities)
     covered: set[Interest] = set()
@@ -340,25 +345,8 @@ def generate_final_plan(
     budget = prefs.budget
     within_budget = True if budget is None else total_cost <= budget
 
-    tradeoffs: list[str] = list(hour_trades)
-    if budget is not None and total_cost > budget:
-        priciest = max(items, key=lambda i: i.cost)
-        tradeoffs.append(
-            f"{priciest.title} is the biggest spend ({format_money(priciest.cost, prefs.currency)}). "
-            f"It pushes you ~{format_money(total_cost - budget, prefs.currency)} over budget, but it's the "
-            "strongest match for your mood. Drop it to stay comfortably within budget."
-        )
-    far = [i for i in items if i.distance_km is not None and i.distance_km > 6]
-    if far:
-        longest = max(far, key=lambda i: i.distance_km)
-        tradeoffs.append(
-            f"The hop to {longest.title} is the longest of the day (~{longest.distance_km:g} km, "
-            f"~{longest.travel_mins} min) — worth it for the fit, but plan the ride."
-        )
-    if used_fallback:
-        tradeoffs.append(
-            "Live place data was unavailable, so this uses our curated catalogue — names are illustrative rather than exact venues."
-        )
+    # Trade-offs live in build_tradeoffs() so the agent can refresh them after the
+    # plan is pruned for time/constraints (otherwise they can reference dropped stops).
 
     theme_bits: list[str] = []
     if set(prefs.mood_tags) & {"relaxed", "cozy"}:
@@ -387,7 +375,7 @@ def generate_final_plan(
 
     source = "mock" if used_fallback else ("mixed" if any(i.source == "mock" for i in items) else "osm")
 
-    return Plan(
+    plan = Plan(
         city=prefs.city or "your city",
         headline=headline,
         summary=summary,
@@ -397,8 +385,64 @@ def generate_final_plan(
         currency=prefs.currency,
         within_budget=within_budget,
         total_duration_mins=sum(i.duration_mins for i in items) + total_travel,
-        tradeoffs=tradeoffs,
         warnings=list(hour_warnings),
+        swaps=list(hour_trades),
         source=source,
         generated_at=datetime.now(timezone.utc).isoformat(),
     )
+    plan.tradeoffs = build_tradeoffs(plan, prefs, activities, foods, used_fallback)
+    return plan
+
+
+def build_tradeoffs(
+    plan: Plan,
+    prefs: Preferences,
+    activities: list[PlaceCandidate],
+    foods: list[PlaceCandidate],
+    used_fallback: bool = False,
+) -> list[str]:
+    """Compute the plan's trade-offs from its *current* items.
+
+    Called once when the plan is drafted and again after pruning, so the notes
+    always match the stops the user actually sees.
+    """
+    tradeoffs: list[str] = list(plan.swaps)
+
+    if plan.budget is not None and plan.total_cost > plan.budget and plan.items:
+        priciest = max(plan.items, key=lambda i: i.cost)
+        tradeoffs.append(
+            f"{priciest.title} is the biggest spend ({format_money(priciest.cost, prefs.currency)}). "
+            f"It pushes you ~{format_money(plan.total_cost - plan.budget, prefs.currency)} over budget, but it's "
+            "the strongest match for your mood. Drop it to stay comfortably within budget."
+        )
+
+    chosen_ids = {item.id for item in plan.items}
+    if prefs.avoid_crowded:
+        skipped_busy = [c for c in (list(activities) + list(foods)) if c.crowd == "high" and c.id not in chosen_ids]
+        if skipped_busy:
+            tradeoffs.append(f"Skipped {skipped_busy[0].name} — it's usually busy, and you asked to avoid crowds.")
+
+    covered_interests = {tag for item in plan.items for tag in item.tags} & set(prefs.interests)
+    # Only call an interest "uncovered" if no candidate matched it at all — if one
+    # existed but was trimmed for time, the time warning already explains that.
+    available_interests = {i for c in (list(activities) + list(foods)) for i in c.interests} & set(prefs.interests)
+    uncovered = [i for i in prefs.interests if i not in covered_interests and i not in available_interests]
+    if uncovered and covered_interests:
+        tradeoffs.append(
+            f"No strong {', '.join(uncovered)} option nearby was a good fit, so the day leans on "
+            f"{', '.join(i for i in prefs.interests if i in covered_interests)} instead."
+        )
+
+    far = [i for i in plan.items if i.distance_km is not None and i.distance_km > 6]
+    if far:
+        longest = max(far, key=lambda i: i.distance_km)
+        tradeoffs.append(
+            f"The hop to {longest.title} is the longest of the day (~{longest.distance_km:g} km, "
+            f"~{longest.travel_mins} min) — worth it for the fit, but plan the ride."
+        )
+
+    if used_fallback:
+        tradeoffs.append(
+            "Live place data was unavailable, so this uses our curated catalogue — names are illustrative rather than exact venues."
+        )
+    return tradeoffs

@@ -79,3 +79,54 @@ def test_usd_budget_detection():
     prefs = parse_user_preferences("New York, $60, 5 hours, energetic, art and coffee")
     assert prefs.currency == "USD"
     assert prefs.budget == 60
+
+
+def test_structured_currency_is_derived_from_city():
+    assert parse_structured({"city": "London"}).currency == "GBP"
+    assert parse_structured({"city": "Paris"}).currency == "EUR"
+    assert parse_structured({"city": "Tokyo"}).currency == "JPY"
+    assert parse_structured({"city": "New York"}).currency == "USD"
+    assert parse_structured({"city": "Bangalore"}).currency == "INR"
+
+
+def test_budget_answered_and_interests_explicit_flags():
+    specific = parse_user_preferences("Bangalore, ₹2000, 4 hours, food and music, relaxed")
+    assert specific.budget_answered is True
+    assert specific.interests_explicit is True
+
+    vague = parse_user_preferences("I want to do something")
+    assert vague.budget_answered is False
+    assert vague.interests_explicit is False
+
+
+def test_no_limit_counts_as_a_budget_answer_and_skips_budget_question():
+    prefs = parse_user_preferences("Bangalore, no limit, relaxed")
+    assert prefs.budget_answered is True
+    questions = detect_clarifications(prefs)
+    assert not any(q.field == "budget" for q in questions)
+
+
+def test_unlimited_also_counts_as_a_budget_answer():
+    prefs = parse_user_preferences("Bangalore, unlimited budget, food and music, relaxed")
+    assert prefs.budget_answered is True
+    assert not any(q.field == "budget" for q in detect_clarifications(prefs))
+
+
+def test_budget_question_is_asked_when_budget_missing():
+    prefs = parse_user_preferences("Bangalore, relaxed")
+    assert prefs.budget_answered is False
+    assert any(q.field == "budget" for q in detect_clarifications(prefs))
+
+
+def test_mood_question_asked_when_interests_not_explicit_and_mood_missing():
+    prefs = parse_user_preferences("Bangalore, ₹2000, 4 hours")
+    assert prefs.interests_explicit is False
+    assert prefs.mood is None
+    assert any(q.field == "mood" for q in detect_clarifications(prefs))
+
+
+def test_no_mood_question_when_interests_are_explicit():
+    prefs = parse_user_preferences("Bangalore, ₹2000, 4 hours, food and music")
+    assert prefs.interests_explicit is True
+    assert prefs.mood is None
+    assert not any(q.field == "mood" for q in detect_clarifications(prefs))

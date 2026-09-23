@@ -36,10 +36,17 @@ MoodTag = Literal[
     "playful",
 ]
 
-Currency = Literal["INR", "USD"]
+Currency = Literal["INR", "USD", "EUR", "GBP", "JPY", "SGD", "AED", "AUD"]
 PlaceSource = Literal["osm", "mock"]
 TraceStatus = Literal["running", "ok", "fallback", "error", "info"]
 PlanItemKind = Literal["activity", "food", "walk", "break"]
+
+# Categories that are venues for *eating* rather than activities. These belong to
+# the food tool, never the activity pool — otherwise a vegetarian user can be
+# sent to a steakhouse as an "activity".
+FOOD_CATEGORIES = frozenset(
+    {"restaurant", "vegetarian restaurant", "cafe", "café", "fast food", "food court", "street food"}
+)
 
 
 @dataclass
@@ -56,6 +63,8 @@ class Preferences:
     vegetarian: bool = False
     avoid_crowded: bool = False
     assumptions: list[str] = field(default_factory=list)
+    budget_answered: bool = False
+    interests_explicit: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -118,6 +127,7 @@ class Plan:
     total_duration_mins: int
     tradeoffs: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    swaps: list[str] = field(default_factory=list)
     budget: Optional[int] = None
     within_budget: bool = True
     source: str = "mock"

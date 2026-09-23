@@ -1,6 +1,7 @@
 from planner.models import PlaceCandidate
 from planner.tools.cost import (
     convert_cost,
+    default_budget,
     estimate_cost,
     estimate_item_cost,
     format_money,
@@ -51,3 +52,21 @@ def test_estimate_cost_without_budget_is_within():
 def test_format_money():
     assert format_money(2000, "INR") == "₹2,000"
     assert format_money(40, "USD") == "$40"
+
+
+def test_format_money_gbp_eur_jpy():
+    assert format_money(35, "GBP") == "£35"
+    assert format_money(40, "EUR") == "€40"
+    assert format_money(6000, "JPY") == "¥6,000"
+
+
+def test_convert_cost_gbp_eur_jpy():
+    assert convert_cost(2000, "GBP") == 32
+    assert convert_cost(2000, "EUR") == 36
+    assert convert_cost(2000, "JPY") == 6000
+
+
+def test_default_budget_gbp_eur_jpy():
+    assert default_budget("GBP") == 35
+    assert default_budget("EUR") == 40
+    assert default_budget("JPY") == 6000

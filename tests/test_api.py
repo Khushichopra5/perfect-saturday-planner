@@ -96,6 +96,14 @@ def test_simulate_outage_flag_degrades_gracefully():
     assert any(e["type"] == "trace" and e["step"]["status"] == "fallback" for e in events)
 
 
+def test_forced_empty_input_still_produces_a_plan():
+    resp = client.post("/api/plan", json={"input": "", "force": True})
+    assert resp.status_code == 200
+    events = parse_sse(resp.text)
+    assert any(e["type"] == "plan" for e in events)
+    assert events[-1]["type"] == "done"
+
+
 def test_empty_body_returns_400():
     assert client.post("/api/plan", json={}).status_code == 400
 

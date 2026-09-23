@@ -1,4 +1,10 @@
-from planner.agent import parse_payload, run_agent, run_agent_from_prefs
+import planner.agent as agent_mod
+from planner.agent import (
+    parse_payload,
+    run_agent,
+    run_agent_from_prefs,
+    run_agent_from_prefs_safe,
+)
 from planner.tools.parse import parse_user_preferences
 
 EXPECTED_TOOLS = {
@@ -105,3 +111,20 @@ def test_parse_payload_structured():
 
 def test_parse_payload_empty():
     assert parse_payload({}) == (None, None)
+
+
+async def test_run_agent_from_prefs_safe_surfaces_errors(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(agent_mod, "generate_final_plan", boom)
+    prefs = parse_user_preferences("Bangalore, ₹2000, 4 hours, relaxed, food and walks")
+
+    events = await collect(run_agent_from_prefs_safe(prefs, force=True))
+    types = [e["type"] for e in events]
+
+    assert types[-1] == "done"
+    assert "error" in types
+    error_index = types.index("error")
+    assert events[error_index - 1]["type"] == "trace"
+    assert events[error_index - 1]["step"]["status"] == "error"

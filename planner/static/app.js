@@ -8,13 +8,24 @@ const outageEl = document.getElementById("outage");
 const DOT_ICON = { ok: "✓", fallback: "!", error: "×", info: "i", running: "" };
 
 let runningSteps = new Map();
+let currentController = null;
 
 function esc(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function setBusy(busy) {
+  goBtn.disabled = busy;
+  goBtn.textContent = busy ? "Planning…" : "Plan my Saturday";
+  randomizeBtn.disabled = busy;
+  document.querySelectorAll("#examples .chip").forEach((chip) => {
+    chip.disabled = busy;
+  });
 }
 
 function clearEmptyState(container) {
@@ -37,24 +48,38 @@ function stepHTML(step) {
 function renderTrace(step) {
   clearEmptyState(traceEl);
   if (step.status === "running") {
-    const node = document.createElement("div");
-    node.className = "step";
+    let node = runningSteps.get(step.tool);
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "step";
+      traceEl.appendChild(node);
+      runningSteps.set(step.tool, node);
+    }
     node.innerHTML = stepHTML(step);
-    traceEl.appendChild(node);
-    runningSteps.set(step.tool, node);
   } else {
-    const existing = runningSteps.get(step.tool);
-    if (existing) {
-      existing.innerHTML = stepHTML(step);
+    const node = runningSteps.get(step.tool);
+    if (node) {
+      node.innerHTML = stepHTML(step);
       runningSteps.delete(step.tool);
     } else {
-      const node = document.createElement("div");
-      node.className = "step";
-      node.innerHTML = stepHTML(step);
-      traceEl.appendChild(node);
+      const fresh = document.createElement("div");
+      fresh.className = "step";
+      fresh.innerHTML = stepHTML(step);
+      traceEl.appendChild(fresh);
     }
   }
   traceEl.scrollTop = traceEl.scrollHeight;
+}
+
+function finalizeRunning() {
+  runningSteps.forEach((node) => {
+    const dot = node.querySelector(".dot");
+    if (dot) {
+      dot.classList.remove("running");
+      dot.classList.add("info");
+    }
+  });
+  runningSteps = new Map();
 }
 
 function renderClarify(questions) {
@@ -92,15 +117,13 @@ function renderClarify(questions) {
 
 function money(amount, currency) {
   const n = Number(amount || 0).toLocaleString(currency === "USD" ? "en-US" : "en-IN");
-  return currency === "USD" ? `$${n}` : `₹${n}`;
+  const symbols = { INR: "₹", USD: "$", EUR: "€", GBP: "£", JPY: "¥", SGD: "S$", AED: "AED ", AUD: "A$" };
+  return `${symbols[currency] || ""}${n}`;
 }
 
 function itemCard(item, currency) {
   const tags = (item.tags || [])
-    .map((t) => {
-      const live = t === "live-data" || t === "curated" || t === "quiet";
-      return `<span class="tag ${live ? "live" : ""}">${esc(t)}</span>`;
-    })
+    .map((t) => `<span class="tag ${t === "live-data" ? "live" : ""}">${esc(t)}</span>`)
     .join("");
   const note = item.note ? `<div class="note">${esc(item.note)}</div>` : "";
   const cost = Number(item.cost) > 0 ? money(item.cost, currency) : "Free";
@@ -122,6 +145,8 @@ function itemCard(item, currency) {
 
 function renderPlan(plan) {
   clearEmptyState(planEl);
+  const items = Array.isArray(plan.items) ? plan.items : [];
+  const totalMins = Number(plan.total_duration_mins) || 0;
   const budgetPill =
     plan.budget != null
       ? `<span class="pill ${plan.within_budget ? "good" : "warn"}">${
@@ -129,7 +154,8 @@ function renderPlan(plan) {
         } · ${esc(money(plan.total_cost, plan.currency))} / ${esc(money(plan.budget, plan.currency))}</span>`
       : `<span class="pill">Est. ${esc(money(plan.total_cost, plan.currency))}</span>`;
 
-  const sourceLabel = plan.source === "osm" ? "Live OpenStreetMap data" : plan.source === "mixed" ? "Mixed live + curated" : "Curated data";
+  const sourceLabel =
+    plan.source === "osm" ? "Live OpenStreetMap data" : plan.source === "mixed" ? "Mixed live + curated" : "Curated data";
 
   const tradeoffs = (plan.tradeoffs || []).length
     ? `<div class="callout warn"><strong>Trade-offs &amp; notes</strong><ul>${plan.tradeoffs
@@ -141,11 +167,11 @@ function renderPlan(plan) {
     `<div class="plan-head"><h2>${esc(plan.headline)}</h2><p>${esc(plan.summary)}</p></div>` +
     `<div class="meta-row">` +
     budgetPill +
-    `<span class="pill">${esc(Math.round(plan.total_duration_mins / 6) / 10)}h door-to-door</span>` +
-    `<span class="pill">${esc(plan.items.length)} stops</span>` +
+    `<span class="pill">${esc(Math.round(totalMins / 6) / 10)}h door-to-door</span>` +
+    `<span class="pill">${esc(items.length)} stops</span>` +
     `<span class="pill">${esc(sourceLabel)}</span>` +
     `</div>` +
-    `<div class="timeline">${plan.items.map((i) => itemCard(i, plan.currency)).join("")}</div>` +
+    `<div class="timeline">${items.map((i) => itemCard(i, plan.currency)).join("")}</div>` +
     tradeoffs;
 }
 
@@ -155,63 +181,6 @@ function renderError(message) {
   box.className = "callout error";
   box.innerHTML = `<strong>Something went wrong.</strong><div>${esc(message)}</div>`;
   planEl.prepend(box);
-}
-
-async function runPlanner(force = false) {
-  const text = inputEl.value.trim();
-  if (!text && !force) {
-    inputEl.focus();
-    return;
-  }
-
-  goBtn.disabled = true;
-  goBtn.textContent = "Planning…";
-  traceEl.innerHTML = "";
-  runningSteps = new Map();
-  planEl.innerHTML = `<p class="empty">Thinking…</p>`;
-
-  try {
-    const res = await fetch("/api/plan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ input: text, force, simulate_outage: Boolean(outageEl && outageEl.checked) }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `Request failed (${res.status})`);
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      let idx;
-      while ((idx = buffer.indexOf("\n\n")) !== -1) {
-        const frame = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 2);
-        const dataLine = frame.split("\n").find((l) => l.startsWith("data: "));
-        if (!dataLine) continue;
-        let event;
-        try {
-          event = JSON.parse(dataLine.slice(6));
-        } catch {
-          continue;
-        }
-        handleEvent(event);
-      }
-    }
-  } catch (err) {
-    renderError(err.message || String(err));
-  } finally {
-    goBtn.disabled = false;
-    goBtn.textContent = "Plan my Saturday";
-  }
 }
 
 function handleEvent(event) {
@@ -229,10 +198,73 @@ function handleEvent(event) {
       renderError(event.message);
       break;
     case "done":
-      runningSteps = new Map();
+      finalizeRunning();
       break;
     default:
       break;
+  }
+}
+
+function parseFrame(frame) {
+  const line = frame.split(/\r?\n/).find((l) => l.startsWith("data:"));
+  if (!line) return;
+  try {
+    handleEvent(JSON.parse(line.slice(5).trim()));
+  } catch {
+    /* ignore malformed frame */
+  }
+}
+
+async function runPlanner(force = false) {
+  const text = inputEl.value.trim();
+  if (!text && !force) {
+    inputEl.focus();
+    return;
+  }
+
+  if (currentController) currentController.abort();
+  const controller = new AbortController();
+  currentController = controller;
+
+  setBusy(true);
+  traceEl.innerHTML = "";
+  runningSteps = new Map();
+  planEl.innerHTML = `<p class="empty">Thinking…</p>`;
+
+  try {
+    const res = await fetch("/api/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: text, force, simulate_outage: Boolean(outageEl && outageEl.checked) }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Request failed (${res.status})`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() ?? "";
+      frames.forEach(parseFrame);
+    }
+    if (buffer.trim()) parseFrame(buffer);
+  } catch (err) {
+    if (err.name !== "AbortError") renderError(err.message || String(err));
+  } finally {
+    finalizeRunning();
+    if (currentController === controller) {
+      currentController = null;
+      setBusy(false);
+    }
   }
 }
 

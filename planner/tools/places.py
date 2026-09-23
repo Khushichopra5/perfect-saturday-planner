@@ -23,7 +23,7 @@ from typing import Any, Optional
 import httpx
 
 from ..data.mock_data import find_known_city
-from ..models import Currency, Interest, MoodTag, PlaceCandidate, PlaceSource
+from ..models import FOOD_CATEGORIES, Currency, Interest, MoodTag, PlaceCandidate, PlaceSource
 
 USER_AGENT = "PerfectSaturdayPlanner/1.0 (open-source Saturday planning demo)"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
@@ -35,6 +35,25 @@ OVERPASS_ENDPOINTS = (
 NOMINATIM_TIMEOUT = 6.0
 OVERPASS_TIMEOUT = 8.0
 OVERPASS_TOTAL_BUDGET = 11.0
+
+COUNTRY_CURRENCY: dict[str, Currency] = {
+    "in": "INR",
+    "us": "USD",
+    "gb": "GBP",
+    "fr": "EUR",
+    "de": "EUR",
+    "es": "EUR",
+    "it": "EUR",
+    "nl": "EUR",
+    "be": "EUR",
+    "at": "EUR",
+    "pt": "EUR",
+    "ie": "EUR",
+    "jp": "JPY",
+    "sg": "SGD",
+    "ae": "AED",
+    "au": "AUD",
+}
 
 _geo_cache: dict[str, "GeoLocation | None"] = {}
 _overpass_cache: dict[str, list[dict[str, Any]]] = {}
@@ -57,6 +76,7 @@ class GeoLocation:
 class OptionsResult:
     items: list[PlaceCandidate]
     source: PlaceSource
+    provider: str = "none"  # "overpass" | "nominatim" | "none"
 
 
 async def geocode_city(city: str) -> Optional[GeoLocation]:
@@ -79,7 +99,7 @@ async def geocode_city(city: str) -> Optional[GeoLocation]:
                 data = resp.json()
                 if data:
                     country = (data[0].get("address") or {}).get("country_code", "").lower()
-                    currency: Currency = "INR" if country == "in" else (known.currency if known else "USD")  # type: ignore[assignment]
+                    currency: Currency = COUNTRY_CURRENCY.get(country) or (known.currency if known else "USD")  # type: ignore[assignment]
                     loc = GeoLocation(
                         name=city,
                         lat=float(data[0]["lat"]),
@@ -253,7 +273,9 @@ def _is_vegetarian_friendly(tags: dict[str, str]) -> bool:
         return True
     if any(word in cuisine for word in NON_VEG_CUISINES):
         return False
-    return tags.get("amenity") == "cafe"
+    # Unknown cuisine: most restaurants/cafes can feed a vegetarian, so only an
+    # explicitly non-vegetarian cuisine disqualifies a place.
+    return tags.get("amenity") in ("restaurant", "cafe", "fast_food")
 
 
 def _score_candidate(
@@ -293,6 +315,17 @@ def _score_candidate(
     return score
 
 
+def prefer_vegetarian(items: list[PlaceCandidate], vegetarian: bool) -> list[PlaceCandidate]:
+    """If vegetarian and any veg-friendly option exists, drop the rest.
+
+    Keeps us from picking a non-veg stop that then gets removed by validation.
+    """
+    if not vegetarian:
+        return items
+    veg = [c for c in items if c.vegetarian_friendly]
+    return veg or items
+
+
 def score_candidates(
     items: list[PlaceCandidate],
     interests: list[Interest],
@@ -327,7 +360,7 @@ def _candidate_from_element(el: dict[str, Any], prefix: str, wanted: list[Intere
 
 
 INTEREST_SEARCH_TERMS: dict[Interest, str] = {
-    "food": "restaurant",
+    "food": "market",
     "music": "live music venue",
     "walks": "park",
     "art": "museum",
@@ -449,6 +482,7 @@ async def get_activity_options(
     """
     wanted = interests or list(DEFAULT_INTERESTS)
     items: list[PlaceCandidate] = []
+    provider = "none"
     try:
         filters: list[str] = []
         for interest in wanted:
@@ -456,6 +490,8 @@ async def get_activity_options(
         query = _build_union_query(filters, geo.lat, geo.lon, 6000, 140)
         elements = await _overpass(query)
         items = _dedupe([_candidate_from_element(el, "osm", wanted, mood_tags, avoid_crowded, False) for el in elements])
+        if items:
+            provider = "overpass"
     except Exception:  # noqa: BLE001 - fall through to the second source
         items = []
 
@@ -463,12 +499,17 @@ async def get_activity_options(
         try:
             terms = [INTEREST_SEARCH_TERMS.get(i, "attraction") for i in wanted]
             pois = await _nominatim_pois(geo.name, terms)
-            items = _dedupe([_candidate_from_poi(p, "osmp", wanted, mood_tags, avoid_crowded, False) for p in pois])
+            fallback = _dedupe([_candidate_from_poi(p, "osmp", wanted, mood_tags, avoid_crowded, False) for p in pois])
+            if fallback:
+                provider = "overpass+nominatim" if items else "nominatim"
+                items = _dedupe(items + fallback)
         except Exception:  # noqa: BLE001
-            items = items or []
+            pass
 
+    # Eating venues belong to the food tool, not the activity pool.
+    items = [c for c in items if c.category not in FOOD_CATEGORIES]
     items.sort(key=lambda c: (-c.score, c.name))
-    return OptionsResult(items=_diversify(items, 24, 5), source="osm")
+    return OptionsResult(items=_diversify(items, 24, 5), source="osm", provider=provider)
 
 
 async def get_food_options(
@@ -478,23 +519,33 @@ async def get_food_options(
 ) -> OptionsResult:
     """Fetch candidate food stops: Overpass first, then Nominatim."""
     items: list[PlaceCandidate] = []
+    provider = "none"
     try:
         filters = ['["amenity"="restaurant"]', '["amenity"="cafe"]', '["amenity"="fast_food"]']
         query = _build_union_query(filters, geo.lat, geo.lon, 5000, 160)
         elements = await _overpass(query)
         items = _dedupe([_candidate_from_element(el, "osm-food", ["food", "coffee"], [], avoid_crowded, vegetarian) for el in elements])
+        if items:
+            provider = "overpass"
     except Exception:  # noqa: BLE001
         items = []
 
     if len(items) < 1:
         try:
             pois = await _nominatim_pois(geo.name, ["restaurant", "cafe"])
-            items = _dedupe([_candidate_from_poi(p, "osmp-food", ["food", "coffee"], [], avoid_crowded, vegetarian) for p in pois])
+            fallback = _dedupe([_candidate_from_poi(p, "osmp-food", ["food", "coffee"], [], avoid_crowded, vegetarian) for p in pois])
+            if fallback:
+                provider = "overpass+nominatim" if items else "nominatim"
+                items = _dedupe(items + fallback)
         except Exception:  # noqa: BLE001
-            items = items or []
+            pass
 
+    # Keep only genuine eating venues (a bar that matches a "restaurant" search
+    # is not a food stop).
+    items = [c for c in items if c.category in FOOD_CATEGORIES]
+    items = prefer_vegetarian(items, vegetarian)
     for candidate in items:
         if vegetarian and not candidate.vegetarian_friendly:
             candidate.note = "Not tagged vegetarian — verify before booking."
     items.sort(key=lambda c: (-c.score, c.name))
-    return OptionsResult(items=_diversify(items, 20, 8), source="osm")
+    return OptionsResult(items=_diversify(items, 20, 8), source="osm", provider=provider)

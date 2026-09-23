@@ -45,10 +45,11 @@ def test_avoid_crowded_emits_warning(bangalore_prefs):
     assert any("crowd" in w.lower() for w in result.warnings)
 
 
-def test_over_budget_warning(bangalore_prefs):
-    items = [make_item("a", "activity", 30, cost=500)]
+def test_budget_is_handled_by_tradeoffs_not_validation(bangalore_prefs):
+    # Budget is explained once, in generate.build_tradeoffs(), not here.
+    items = [make_item("a", "activity", 30, cost=5000)]
     result = validate_plan(items, bangalore_prefs, 5000)
-    assert any("over your budget" in w.lower() for w in result.warnings)
+    assert not any("budget" in w.lower() for w in result.warnings)
 
 
 def test_clean_plan_has_no_warnings(bangalore_prefs):

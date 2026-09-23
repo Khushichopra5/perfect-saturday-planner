@@ -14,6 +14,7 @@ from .places import (
     geocode_city,
     get_activity_options,
     get_food_options,
+    prefer_vegetarian,
     score_candidates,
 )
 from .validate import validate_plan
@@ -26,6 +27,7 @@ __all__ = [
     "get_activity_options",
     "get_food_options",
     "score_candidates",
+    "prefer_vegetarian",
     "estimate_cost",
     "estimate_item_cost",
     "format_money",

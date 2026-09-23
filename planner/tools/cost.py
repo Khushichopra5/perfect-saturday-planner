@@ -46,7 +46,42 @@ BASE_COST_INR: dict[str, int] = {
 }
 
 ACTIVITY_DEFAULT_INR = 150
-USD_FACTOR = 0.02
+
+# Rough INR -> local conversion factors and symbols. Costs are estimates, so we
+# only need to be in the right ballpark — but we should at least use the right
+# currency for the city rather than defaulting everything to dollars.
+CURRENCY_FACTOR: dict[str, float] = {
+    "INR": 1.0,
+    "USD": 0.02,
+    "EUR": 0.018,
+    "GBP": 0.016,
+    "JPY": 3.0,
+    "SGD": 0.027,
+    "AED": 0.073,
+    "AUD": 0.030,
+}
+
+CURRENCY_SYMBOL: dict[str, str] = {
+    "INR": "₹",
+    "USD": "$",
+    "EUR": "€",
+    "GBP": "£",
+    "JPY": "¥",
+    "SGD": "S$",
+    "AED": "AED ",
+    "AUD": "A$",
+}
+
+DEFAULT_BUDGET: dict[str, int] = {
+    "INR": 2000,
+    "USD": 40,
+    "EUR": 40,
+    "GBP": 35,
+    "JPY": 6000,
+    "SGD": 55,
+    "AED": 150,
+    "AUD": 60,
+}
 
 
 def _parse_charge(tags: dict[str, str]) -> int | None:
@@ -63,9 +98,9 @@ def _parse_charge(tags: dict[str, str]) -> int | None:
 
 
 def convert_cost(inr: int, currency: Currency) -> int:
-    if currency == "USD":
-        return max(0, int(round(inr * USD_FACTOR)))
-    return int(round(inr / 10.0)) * 10
+    if currency == "INR":
+        return int(round(inr / 10.0)) * 10
+    return max(0, int(round(inr * CURRENCY_FACTOR.get(currency, 0.02))))
 
 
 def estimate_item_cost(candidate: PlaceCandidate, currency: Currency) -> int:
@@ -102,13 +137,11 @@ def estimate_cost(costs: list[int], budget: int | None, currency: Currency = "IN
 
 
 def format_money(amount: int, currency: Currency) -> str:
-    if currency == "USD":
-        return f"${amount:,}"
-    return f"₹{amount:,}"
+    return f"{CURRENCY_SYMBOL.get(currency, '')}{amount:,}"
 
 
 def default_budget(currency: Currency) -> int:
-    return 40 if currency == "USD" else 2000
+    return DEFAULT_BUDGET.get(currency, 2000)
 
 
 def normalize_budget(prefs: Preferences) -> int:

@@ -53,9 +53,9 @@ def validate_plan(items: list[PlanItem], prefs: Preferences, total_cost: int) ->
             duration -= item.duration_mins + item.travel_mins
 
     if prefs.vegetarian:
-        offenders = [i for i in items if i.kind == "food" and "vegetarian-friendly" not in i.tags]
+        offenders = [i for i in items if "not-vegetarian" in i.tags]
         if offenders:
-            warnings.append("A food stop isn't tagged vegetarian, so it was swapped out for a safer option.")
+            warnings.append("A food stop wasn't vegetarian-friendly, so it was removed.")
             drop_ids.extend(i.id for i in offenders)
 
     if prefs.avoid_crowded:
@@ -63,7 +63,6 @@ def validate_plan(items: list[PlanItem], prefs: Preferences, total_cost: int) ->
         if busy:
             warnings.append(f"You asked to avoid crowds — flagged {', '.join(b.title for b in busy)} as likely busy.")
 
-    if prefs.budget is not None and total_cost > prefs.budget:
-        warnings.append("Estimated spend is over your budget — see the trade-offs below.")
-
+    # Budget is explained by generate.build_tradeoffs(), not here, so it isn't
+    # reported twice.
     return ValidationResult(warnings=warnings, drop_ids=drop_ids, travel_buffer_mins=travel_buffer_mins)

@@ -29,11 +29,11 @@ time/budget/constraints, and streams its thinking to the browser as it goes.
 | Requirement | Where it lives |
 | --- | --- |
 | **Hosted UI** | FastAPI + single-page UI with SSE streaming; `Dockerfile`, `render.yaml`, `Procfile` included |
-| **Understands preferences** | `parseUserPreferences` handles free text **and** the exact structured JSON brief |
+| **Understands preferences** | `parseUserPreferences` handles free text; `parseStructured` handles the exact structured JSON brief |
 | **≥ 3 tools/functions** | 8 tools, no giant prompt (below) |
 | **Realistic, specific plan** | Real OSM places, ordered by real distance, timed with travel buffers, sized to your hours |
 | **Explains why each part fits** | Every stop carries a `why` built from your mood, interests and constraints |
-| **Handles a failure case** | Six distinct failure paths, all visible in the trace (below) |
+| **Handles a failure case** | Eight distinct failure paths, all visible in the trace (below) |
 | **Shows a trace** | Live "agent is thinking" stream of each tool call, its status and duration |
 
 ### Bonus points
@@ -49,13 +49,13 @@ time/budget/constraints, and streams its thinking to the browser as it goes.
 
 ### Tools (each independently unit-tested)
 
-1. `parseUserPreferences(input)` — free text or structured → normalised `Preferences`, plus documented assumptions.
+1. `parseUserPreferences(input)` / `parseStructured(payload)` — free text or the exact JSON brief → normalised `Preferences`, plus documented assumptions.
 2. `geocodeCity(city)` — Nominatim, with an offline city index fallback.
-3. `getActivityOptions(city, interests, mood, constraints)` — Overpass → Nominatim POI search → curated catalogue.
-4. `getFoodOptions(city, budget, constraints)` — same layered approach, vegetarian-aware.
-5. `estimateCost(plan, budget)` — real `charge`/`fee` tags when present, then curated costs, then category defaults.
-6. `validatePlan(plan, constraints)` — checks time (incl. travel), budget, vegetarian and crowd constraints.
-7. `generateFinalPlan(context)` — orders by proximity, times the day, swaps closed stops, writes the "why".
+3. `getActivityOptions(geo, interests, moodTags, avoidCrowded)` — Overpass → Nominatim POI search → curated catalogue.
+4. `getFoodOptions(geo, vegetarian, avoidCrowded)` — same layered approach, vegetarian-aware.
+5. `estimateCost(itemCosts, budget, currency)` — real `charge`/`fee` tags when present, then curated costs, then category defaults.
+6. `validatePlan(items, prefs, totalCost)` — checks time (incl. travel), vegetarian and crowd constraints (budget trade-offs come from `generateFinalPlan`).
+7. `generateFinalPlan(activities, foods, prefs, usedFallback, origin)` — orders by proximity, times the day, swaps closed stops, writes the "why".
 8. `openingHours` / `geo` helpers — parse OSM `opening_hours` and compute haversine distance + travel time.
 
 The agent (`planner/agent.py`) is only an orchestrator: it decides the order and
@@ -83,33 +83,52 @@ forces the graceful-degradation path.
 
 ## Run locally
 
-Requires Python 3.11+.
+Requires **Python 3.11+** (3.12 recommended) and `git`.
 
 ```bash
-git clone <your-repo> && cd Kassmt
-python -m venv .venv && source .venv/bin/activate
+# 1. Clone and enter the project
+git clone https://github.com/Khushichopra5/perfect-saturday-planner.git
+cd perfect-saturday-planner
+
+# 2. Create and activate a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate          # Windows (PowerShell): .venv\Scripts\Activate.ps1
+
+# 3. Install dependencies (runtime + test/lint tools)
 pip install -r requirements-dev.txt
 
-uvicorn planner.main:app --reload
-# open http://127.0.0.1:8000
+# 4. Start the server
+python -m uvicorn planner.main:app --reload
 ```
 
-Or with [uv](https://docs.astral.sh/uv/):
+Then open **http://127.0.0.1:8000** in your browser.
+
+> `python -m uvicorn ...` is used instead of bare `uvicorn` so it works even when
+> the venv's scripts folder isn't on your `PATH`. `python -m planner.main` does the
+> same thing and honours the `PORT` environment variable.
+
+### Or with [uv](https://docs.astral.sh/uv/) (no manual venv activation)
 
 ```bash
-uv venv && uv pip install -r requirements-dev.txt
+uv venv
+uv pip install -r requirements-dev.txt
 uv run uvicorn planner.main:app --reload
 ```
 
-Set `PLANNER_OFFLINE=1` to force the curated catalogue (no network calls).
+### Offline mode
+
+Set `PLANNER_OFFLINE=1` before starting the server to force the curated catalogue
+(no network calls), e.g. `PLANNER_OFFLINE=1 python -m uvicorn planner.main:app`.
 
 ### Optional: LLM narrator
 
-The planner works fully without any LLM. If you set an OpenAI-compatible key it
-will additionally polish the headline, summary and per-stop explanations:
+The planner works fully without any LLM — the narrator is entirely optional. To
+enable it, create a `.env` with an OpenAI-compatible key and **restart the server**
+(the file is only read at startup):
 
 ```bash
 cp .env.example .env   # then fill in OPENAI_API_KEY
+# then restart: python -m uvicorn planner.main:app --reload
 ```
 
 ---
@@ -121,12 +140,15 @@ cp .env.example .env   # then fill in OPENAI_API_KEY
 pytest -q
 
 # true end-to-end: boots a real uvicorn server and streams from it
-python scripts/e2e_live.py          # offline
-python scripts/e2e_live.py --live   # hits real OpenStreetMap
+python scripts/e2e_live.py          # offline — 25/25 checks
+python scripts/e2e_live.py --live   # real OpenStreetMap — 28/28 checks
+
+# or point the same suite at a deployment
+python scripts/e2e_live.py --url https://perfect-saturday-planner.onrender.com
 ```
 
-Both suites pass: **69/69** pytest, **28/28** live-server checks (including real
-OpenStreetMap data and real travel distances).
+Both pass: **69/69** pytest, **25/25** offline e2e checks, and **28/28** live
+checks (the extra 3 are the real OpenStreetMap assertions).
 
 ---
 
@@ -241,10 +263,9 @@ keyless; only the optional LLM narrator needs a key.
 
 ## How I used AI tools during the build
 
-I built this with an AI coding assistant (opencode) as a pair-programmer: it
-scaffolded the FastAPI app and tool modules, ported the planning heuristics, and
-generated the pytest + end-to-end suites. I used it most for debugging real-world
-integration issues — e.g. it helped me discover that Nominatim 403s a User-Agent
-containing `example.com`, and that the Overpass query needed a total time budget
-plus a second data source to stay responsive. All design decisions (tool
-decomposition, fallback ordering, streaming trace) and the final review were mine.
+I used an AI coding assistant (opencode) as a pair-programmer to scaffold the
+FastAPI app and tool modules. I leaned on it most to debug real integration
+issues: Nominatim 403s a User-Agent containing `example.com`, and Overpass needs
+a total time budget plus a second data source to stay responsive. I made the
+design calls (tool decomposition, fallback ordering, streaming trace) and reviewed
+the final result.

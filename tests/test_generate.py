@@ -1,11 +1,48 @@
-from planner.models import PlaceCandidate
-from planner.tools.generate import _choose_activities, generate_final_plan, prune_plan
+from planner.models import PlaceCandidate, Plan, PlanItem, Preferences
+from planner.tools.generate import (
+    _choose_activities,
+    build_tradeoffs,
+    generate_final_plan,
+    prune_plan,
+)
 from planner.tools.parse import parse_user_preferences
 from planner.tools.places import score_candidates
 
 
 def rank(activities, prefs, vegetarian=False):
     return score_candidates(activities, prefs.interests, prefs.mood_tags, prefs.avoid_crowded, vegetarian)
+
+
+def make_item(item_id, title, cost, tags=None, kind="activity", distance_km=None):
+    return PlanItem(
+        id=item_id,
+        kind=kind,
+        title=title,
+        description="",
+        location="Testville",
+        start_time="10:00 AM",
+        duration_mins=60,
+        cost=cost,
+        tags=tags or [],
+        why="",
+        source="mock",
+        distance_km=distance_km,
+    )
+
+
+def make_plan(items, total_cost, budget=None, swaps=None):
+    return Plan(
+        city="Testville",
+        headline="",
+        summary="",
+        items=items,
+        total_cost=total_cost,
+        currency="INR",
+        total_duration_mins=sum(i.duration_mins + i.travel_mins for i in items),
+        budget=budget,
+        within_budget=True if budget is None else total_cost <= budget,
+        swaps=swaps or [],
+    )
 
 
 def test_generates_a_timed_plan_with_reasons(bangalore_prefs, activities, foods):
@@ -87,3 +124,57 @@ def test_short_window_produces_smaller_plan(bangalore_prefs, activities, foods):
         bangalore_prefs,
     )
     assert len(plan.items) == 2
+
+
+def test_build_tradeoffs_notes_over_budget_priciest_item():
+    prefs = Preferences(city="Testville", budget=100, currency="INR", interests=["art"])
+    plan = make_plan([make_item("a", "Pricey Museum", 800, tags=["museum", "art"])], 800, budget=100)
+    trades = build_tradeoffs(plan, prefs, [], [], False)
+    assert any("over budget" in t for t in trades)
+    assert any("Pricey Museum" in t for t in trades)
+
+
+def test_build_tradeoffs_skips_high_crowd_candidate_when_avoiding_crowds():
+    prefs = Preferences(city="Testville", currency="INR", interests=["walks"], avoid_crowded=True)
+    busy = PlaceCandidate(
+        id="busy", name="Busy Market", category="market", interests=["shopping"], source="osm", crowd="high"
+    )
+    calm = PlaceCandidate(
+        id="calm", name="Quiet Park", category="park", interests=["walks"], source="osm", crowd="low"
+    )
+    plan = make_plan([make_item("calm", "Quiet Park", 0, tags=["park", "walks", "quiet"])], 0)
+    trades = build_tradeoffs(plan, prefs, [busy, calm], [], False)
+    assert any(t.startswith("Skipped Busy Market") for t in trades)
+
+
+def test_build_tradeoffs_does_not_call_available_interest_uncovered():
+    prefs = Preferences(city="Testville", currency="INR", interests=["walks", "music"])
+    trimmed = PlaceCandidate(
+        id="music", name="Music Room", category="music venue", interests=["music"], source="osm", crowd="low"
+    )
+    plan = make_plan([make_item("park", "Quiet Park", 0, tags=["park", "walks", "quiet"])], 0)
+    trades = build_tradeoffs(plan, prefs, [trimmed], [], False)
+    assert not any("No strong" in t for t in trades)
+
+
+def test_build_tradeoffs_starts_from_plan_swaps():
+    prefs = Preferences(city="Testville", currency="INR")
+    plan = make_plan([], 0, swaps=["Swapped A → B: A was closed."])
+    trades = build_tradeoffs(plan, prefs, [], [], False)
+    assert trades[0] == "Swapped A → B: A was closed."
+
+
+def test_tradeoffs_refresh_after_pruning_reference_kept_item():
+    prefs = Preferences(city="Testville", budget=100, currency="INR", interests=["art"])
+    pricey = make_item("pricey", "Pricey Museum", 800, tags=["museum", "art"])
+    cheap = make_item("cheap", "Cheap Park", 200, tags=["park", "art"])
+    plan = make_plan([pricey, cheap], 1000, budget=100)
+
+    pruned = prune_plan(plan, ["pricey"], prefs)
+    assert [i.id for i in pruned.items] == ["cheap"]
+    assert pruned.total_cost == 200
+
+    trades = build_tradeoffs(pruned, prefs, [], [], False)
+    note = next(t for t in trades if "biggest spend" in t)
+    assert "Cheap Park" in note
+    assert "Pricey Museum" not in note

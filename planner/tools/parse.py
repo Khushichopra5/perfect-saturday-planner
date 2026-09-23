@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from ..data.mock_data import find_known_city
 from ..models import ClarifyingQuestion, Currency, Interest, MoodTag, Preferences
+from .cost import default_budget, format_money
 
 INTEREST_KEYWORDS: dict[Interest, tuple[str, ...]] = {
     "food": ("food", "foodie", "eat", "eating", "brunch", "lunch", "dinner", "cuisine", "restaurant", "street food", "snack"),
@@ -79,9 +80,35 @@ def _extract_city(raw: str, text: str) -> Optional[str]:
     return None
 
 
-def _extract_budget(text: str) -> tuple[Optional[int], Currency]:
-    currency: Currency = "USD" if re.search(r"\$|usd|dollar", text, re.I) else "INR"
-    match = re.search(r"(?:₹|\$|budget(?:\s+of)?|under|within|about|around|approx\.?)?\s*([\d][\d,]*\.?\d*)\s*(k|thousand)?", text, re.I)
+_CURRENCY_PATTERNS: tuple[tuple[str, Currency], ...] = (
+    (r"₹|\brs\.?\b|\binr\b|rupee", "INR"),
+    (r"\$|\busd\b|dollar", "USD"),
+    (r"€|\beur\b|euro", "EUR"),
+    (r"£|\bgbp\b|pound", "GBP"),
+    (r"¥|\bjpy\b|yen", "JPY"),
+    (r"\bsgd\b|s\$", "SGD"),
+    (r"\baed\b|dirham", "AED"),
+    (r"\baud\b|a\$", "AUD"),
+)
+
+
+def _detect_currency(text: str) -> Optional[Currency]:
+    for pattern, currency in _CURRENCY_PATTERNS:
+        if re.search(pattern, text, re.I):
+            return currency
+    return None
+
+
+def _extract_budget(text: str) -> tuple[Optional[int], Optional[Currency]]:
+    currency = _detect_currency(text)
+    # The number must not be a quantity of time/people ("4 hours", "2 people").
+    match = re.search(
+        r"(?:₹|\$|€|£|¥|budget(?:\s+of)?|under|within|about|around|approx\.?)?\s*"
+        r"([\d][\d,]*\.?\d*)\s*(k|thousand)?"
+        r"(?!\s*(?:hours?|hrs?|h|min|mins?|minutes?|days?|people|ppl|adults?|kids?|stops?)\b)",
+        text,
+        re.I,
+    )
     if not match:
         return None, currency
     try:
@@ -138,9 +165,15 @@ def parse_user_preferences(text: str) -> Preferences:
 
     city = _extract_city(raw, normalized)
 
-    budget, currency = _extract_budget(normalized)
+    budget, detected_currency = _extract_budget(normalized)
+    known_city = find_known_city(city) if city else None
+    currency: Currency = detected_currency or (known_city.currency if known_city else "INR")  # type: ignore[assignment]
+    no_limit = bool(re.search(r"\b(no limit|unlimited|no budget|any budget|money is no object|whatever it costs)\b", normalized))
+    budget_answered = budget is not None or no_limit
     if budget is None:
-        assumptions.append("No budget given — assumed a comfortable ₹2,000 / $40 range.")
+        assumptions.append(
+            f"No budget given — assumed a comfortable {format_money(default_budget(currency), currency)} range."
+        )
 
     time_hours = _extract_time_hours(normalized)
     if time_hours is None:
@@ -151,6 +184,7 @@ def parse_user_preferences(text: str) -> Preferences:
     mood = ", ".join(mood_tags) if mood_tags else None
 
     interests = _extract_interests(normalized)
+    interests_explicit = bool(interests)
     if not interests:
         interests = ["food", "walks", "art"]
         assumptions.append("No interests given — assumed a mix of food, walks and art.")
@@ -170,6 +204,8 @@ def parse_user_preferences(text: str) -> Preferences:
         vegetarian=vegetarian,
         avoid_crowded=avoid_crowded,
         assumptions=assumptions,
+        budget_answered=budget_answered,
+        interests_explicit=interests_explicit,
     )
 
 
@@ -219,6 +255,7 @@ def parse_structured(payload: dict[str, Any]) -> Preferences:
         key = aliases.get(key, key)
         if key in INTEREST_KEYWORDS and key not in interests:
             interests.append(key)  # type: ignore[arg-type]
+    interests_explicit = bool(interests)
     if not interests:
         interests = ["food", "walks", "art"]
         assumptions.append("No interests given — assumed a mix of food, walks and art.")
@@ -229,9 +266,13 @@ def parse_structured(payload: dict[str, Any]) -> Preferences:
     constraints_text = " ".join(c for c in constraints_raw if isinstance(c, str))
     constraints, vegetarian, avoid_crowded = _extract_constraints(_normalize(constraints_text))
 
-    currency: Currency = "USD" if (city and find_known_city(city) and find_known_city(city).currency == "USD") else "INR"  # type: ignore[union-attr]
-    if budget is None and currency == "USD":
-        assumptions.append("No budget given — assumed a comfortable $40 range.")
+    known_city = find_known_city(city) if city else None
+    detected_currency = _detect_currency(_normalize(str(payload)))
+    currency: Currency = detected_currency or (known_city.currency if known_city else "INR")  # type: ignore[assignment]
+    if budget is None:
+        assumptions.append(
+            f"No budget given — assumed a comfortable {format_money(default_budget(currency), currency)} range."
+        )
 
     return Preferences(
         raw=str(payload),
@@ -246,11 +287,17 @@ def parse_structured(payload: dict[str, Any]) -> Preferences:
         vegetarian=vegetarian,
         avoid_crowded=avoid_crowded,
         assumptions=assumptions,
+        budget_answered=budget is not None,
+        interests_explicit=interests_explicit,
     )
 
 
 def detect_clarifications(prefs: Preferences) -> list[ClarifyingQuestion]:
-    """Ask at most two questions, and only when the request is genuinely vague."""
+    """Ask at most two questions, and only when the request is genuinely vague.
+
+    Ordered by importance: city, then budget, then mood. "No limit" answers are
+    recognised as a real budget answer so we never re-ask in a loop.
+    """
     questions: list[ClarifyingQuestion] = []
     if not prefs.city:
         questions.append(
@@ -260,20 +307,20 @@ def detect_clarifications(prefs: Preferences) -> list[ClarifyingQuestion]:
                 options=["Bangalore", "Mumbai", "Delhi", "New York", "London"],
             )
         )
-    if not prefs.mood and not prefs.interests:
+    if not prefs.budget_answered:
+        questions.append(
+            ClarifyingQuestion(
+                question="Roughly what's your budget for the day?",
+                field="budget",
+                options=["Under ₹1,000", "Around ₹2,000", "₹3,000–5,000", "₹5,000+"],
+            )
+        )
+    if not prefs.mood and not prefs.interests_explicit:
         questions.append(
             ClarifyingQuestion(
                 question="What kind of mood are you in?",
                 field="mood",
                 options=["Tired but want something fun", "Energetic and outdoorsy", "Chill and cozy", "Social with friends"],
-            )
-        )
-    if not prefs.budget:
-        questions.append(
-            ClarifyingQuestion(
-                question="Roughly what's your budget for the day?",
-                field="budget",
-                options=["Under ₹1,000", "Around ₹2,000", "₹3,000–5,000", "No limit"],
             )
         )
     return questions[:2]

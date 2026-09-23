@@ -24,13 +24,14 @@ from . import llm
 from .data.mock_data import build_mock_activities, build_mock_food
 from .models import PlaceCandidate, Preferences, TraceStep
 from .tools.cost import estimate_cost, format_money, normalize_budget
-from .tools.generate import generate_final_plan, prune_plan
+from .tools.generate import build_tradeoffs, generate_final_plan, prune_plan
 from .tools.parse import detect_clarifications, parse_structured, parse_user_preferences
 from .tools.places import (
     GeoLocation,
     geocode_city,
     get_activity_options,
     get_food_options,
+    prefer_vegetarian,
     score_candidates,
 )
 from .tools.validate import validate_plan
@@ -47,6 +48,14 @@ def _next_id() -> str:
 def _trace(tool: str, status: str, message: str, ms: Optional[int] = None) -> dict[str, Any]:
     step = TraceStep(id=_next_id(), tool=tool, status=status, message=message, ms=ms)  # type: ignore[arg-type]
     return {"type": "trace", "step": step.to_dict()}
+
+
+def _provider_label(provider: str) -> str:
+    return {
+        "overpass": "OpenStreetMap Overpass",
+        "nominatim": "OpenStreetMap Nominatim (Overpass was unavailable)",
+        "overpass+nominatim": "OpenStreetMap (Overpass + Nominatim)",
+    }.get(provider, "OpenStreetMap")
 
 
 def _summarize_prefs(prefs: Preferences) -> str:
@@ -132,9 +141,12 @@ async def _continue(
     t = time.monotonic()
     yield _trace("getActivityOptions", "running", f"Searching for {', '.join(prefs.interests)} around {prefs.city or 'you'}…")
     activities: list[PlaceCandidate] = []
+    activity_provider = "none"
     if activity_task is not None:
         try:
-            activities = (await activity_task).items
+            activity_result = await activity_task
+            activities = activity_result.items
+            activity_provider = activity_result.provider
         except Exception:  # noqa: BLE001
             activities = []
     if len(activities) < 2:
@@ -152,25 +164,36 @@ async def _continue(
             message = f"Only {live_count} live option(s) matched — topping up with the curated catalogue ({len(activities)} options)."
         yield _trace("getActivityOptions", "fallback", message, int((time.monotonic() - t) * 1000))
     else:
-        yield _trace("getActivityOptions", "ok", f"Found {len(activities)} candidate activities via OpenStreetMap Overpass.", int((time.monotonic() - t) * 1000))
+        yield _trace(
+            "getActivityOptions",
+            "ok",
+            f"Found {len(activities)} candidate activities via {_provider_label(activity_provider)}.",
+            int((time.monotonic() - t) * 1000),
+        )
 
     # --- food ------------------------------------------------------------
     t = time.monotonic()
     yield _trace("getFoodOptions", "running", f"Looking for {'vegetarian-friendly ' if prefs.vegetarian else ''}food stops…")
     foods: list[PlaceCandidate] = []
+    food_provider = "none"
     if food_task is not None:
         try:
-            foods = (await food_task).items
+            food_result = await food_task
+            foods = food_result.items
+            food_provider = food_result.provider
         except Exception:  # noqa: BLE001
             foods = []
     if len(foods) < 1:
         used_fallback = True
         live_count = len(foods)
-        foods = score_candidates(
-            build_mock_food(prefs.city or "Your City"),
-            ["food", "coffee"],
-            [],
-            prefs.avoid_crowded,
+        foods = prefer_vegetarian(
+            score_candidates(
+                build_mock_food(prefs.city or "Your City"),
+                ["food", "coffee"],
+                [],
+                prefs.avoid_crowded,
+                prefs.vegetarian,
+            ),
             prefs.vegetarian,
         )
         if live_count == 0:
@@ -179,7 +202,12 @@ async def _continue(
             message = f"Only {live_count} live food option(s) — topping up with curated food options ({len(foods)} options)."
         yield _trace("getFoodOptions", "fallback", message, int((time.monotonic() - t) * 1000))
     else:
-        yield _trace("getFoodOptions", "ok", f"Found {len(foods)} food options via OpenStreetMap Overpass.", int((time.monotonic() - t) * 1000))
+        yield _trace(
+            "getFoodOptions",
+            "ok",
+            f"Found {len(foods)} food options via {_provider_label(food_provider)}.",
+            int((time.monotonic() - t) * 1000),
+        )
 
     # --- draft -----------------------------------------------------------
     t = time.monotonic()
@@ -207,8 +235,9 @@ async def _continue(
         yield _trace("validatePlan", "ok", "Plan fits your time, budget and constraints.", int((time.monotonic() - t) * 1000))
 
     plan.warnings = validation.warnings
-    if validation.warnings:
-        plan.tradeoffs.extend(validation.warnings)
+    # Recompute trade-offs against the final (possibly pruned) plan so they never
+    # reference a stop we removed.
+    plan.tradeoffs = build_tradeoffs(plan, prefs, activities, foods, used_fallback) + validation.warnings
 
     # --- optional LLM polish --------------------------------------------
     if llm.enabled():
@@ -245,16 +274,32 @@ async def run_agent_from_prefs(
         yield event
 
 
+async def _guard(agen: AsyncIterator[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+    """Turn any unexpected exception into a streamed error trace + event."""
+    try:
+        async for event in agen:
+            yield event
+    except Exception as exc:  # noqa: BLE001
+        message = f"The agent hit an unexpected error: {exc}"
+        yield _trace("agent", "error", message)
+        yield {"type": "error", "message": message}
+        yield {"type": "done"}
+
+
 async def run_agent_safe(
     input_text: str, force: bool = False, simulate_outage: bool = False
 ) -> AsyncIterator[dict[str, Any]]:
-    """Wrap :func:`run_agent` so an unexpected error becomes a streamed event."""
-    try:
-        async for event in run_agent(input_text, force, simulate_outage):
-            yield event
-    except Exception as exc:  # noqa: BLE001
-        yield {"type": "error", "message": f"The agent hit an unexpected error: {exc}"}
-        yield {"type": "done"}
+    """Free-text entry point that never crashes the stream."""
+    async for event in _guard(run_agent(input_text, force, simulate_outage)):
+        yield event
+
+
+async def run_agent_from_prefs_safe(
+    prefs: Preferences, force: bool = False, simulate_outage: bool = False
+) -> AsyncIterator[dict[str, Any]]:
+    """Structured-input entry point that never crashes the stream."""
+    async for event in _guard(run_agent_from_prefs(prefs, force, simulate_outage)):
+        yield event
 
 
 def parse_payload(payload: dict[str, Any]) -> tuple[Optional[str], Optional[Preferences]]:

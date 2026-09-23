@@ -25,6 +25,7 @@
       <div class="grid">
         <section class="panel">
           <h2>Your Saturday</h2>
+          <label class="visually-hidden" for="input">Describe your Saturday</label>
           <textarea id="input" placeholder="e.g. I'm in Bangalore with about ₹2000 and 4 hours. I'm tired but want to do something fun. I like food, music and walks. I'm vegetarian and want to avoid crowded places."></textarea>
 
           <div class="chips" id="examples">
@@ -50,7 +51,7 @@
 
         <section class="panel">
           <h2>Agent trace</h2>
-          <div class="trace" id="trace">
+          <div class="trace" id="trace" role="log" aria-live="polite" aria-label="Agent trace">
             <p class="empty">Your agent's steps will stream here as it works.</p>
           </div>
         </section>
@@ -58,7 +59,7 @@
 
       <section class="panel result" id="result">
         <h2>Your plan</h2>
-        <div id="plan">
+        <div id="plan" aria-live="polite" aria-label="Your plan">
           <p class="empty">No plan yet — describe your Saturday and hit “Plan my Saturday”.</p>
         </div>
       </section>
