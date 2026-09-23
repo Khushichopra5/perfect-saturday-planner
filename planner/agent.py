@@ -26,7 +26,13 @@ from .models import PlaceCandidate, Preferences, TraceStep
 from .tools.cost import estimate_cost, format_money, normalize_budget
 from .tools.generate import generate_final_plan, prune_plan
 from .tools.parse import detect_clarifications, parse_structured, parse_user_preferences
-from .tools.places import GeoLocation, geocode_city, get_activity_options, get_food_options, score_candidates
+from .tools.places import (
+    GeoLocation,
+    geocode_city,
+    get_activity_options,
+    get_food_options,
+    score_candidates,
+)
 from .tools.validate import validate_plan
 
 _step_counter = 0
@@ -57,7 +63,9 @@ def _summarize_prefs(prefs: Preferences) -> str:
     return "Parsed " + " · ".join(bits)
 
 
-async def _continue(prefs: Preferences, force: bool, started: float) -> AsyncIterator[dict[str, Any]]:
+async def _continue(
+    prefs: Preferences, force: bool, started: float, simulate_outage: bool = False
+) -> AsyncIterator[dict[str, Any]]:
     """Run everything after parsing, given normalised preferences."""
     questions = detect_clarifications(prefs)
     if questions and not force:
@@ -75,27 +83,36 @@ async def _continue(prefs: Preferences, force: bool, started: float) -> AsyncIte
     yield _trace("geocodeCity", "running", f"Locating {prefs.city or 'your city'} on the map…")
     used_fallback = False
     geo: Optional[GeoLocation] = None
-    try:
-        geo = await geocode_city(prefs.city) if prefs.city else None
-    except Exception:  # noqa: BLE001 - any failure must degrade gracefully
-        geo = None
-
-    if not geo:
+    if simulate_outage:
         used_fallback = True
-        message = (
-            f'Couldn\'t find "{prefs.city}" in the live map data — I\'ll build a sensible template plan instead.'
-            if prefs.city
-            else "No city given — building a generic template plan."
-        )
-        yield _trace("geocodeCity", "fallback", message, int((time.monotonic() - t) * 1000))
-    else:
-        via = "OpenStreetMap Nominatim" if geo.source == "osm" else "offline city index"
         yield _trace(
             "geocodeCity",
-            "ok" if geo.source == "osm" else "fallback",
-            f"Found {geo.name} ({geo.lat:.3f}, {geo.lon:.3f}) via {via}.",
+            "fallback",
+            "Live-data outage simulated — skipping map lookups and using the curated catalogue.",
             int((time.monotonic() - t) * 1000),
         )
+    else:
+        try:
+            geo = await geocode_city(prefs.city) if prefs.city else None
+        except Exception:  # noqa: BLE001 - any failure must degrade gracefully
+            geo = None
+
+        if not geo:
+            used_fallback = True
+            message = (
+                f'Couldn\'t find "{prefs.city}" in the live map data — I\'ll build a sensible template plan instead.'
+                if prefs.city
+                else "No city given — building a generic template plan."
+            )
+            yield _trace("geocodeCity", "fallback", message, int((time.monotonic() - t) * 1000))
+        else:
+            via = "OpenStreetMap Nominatim" if geo.source == "osm" else "offline city index"
+            yield _trace(
+                "geocodeCity",
+                "ok" if geo.source == "osm" else "fallback",
+                f"Found {geo.name} ({geo.lat:.3f}, {geo.lon:.3f}) via {via}.",
+                int((time.monotonic() - t) * 1000),
+            )
 
     # Kick off both live lookups at once so the user waits for the slower one,
     # not their sum. Each still degrades to the curated catalogue on failure.
@@ -122,18 +139,18 @@ async def _continue(prefs: Preferences, force: bool, started: float) -> AsyncIte
             activities = []
     if len(activities) < 2:
         used_fallback = True
+        live_count = len(activities)
         activities = score_candidates(
             build_mock_activities(prefs.city or "Your City"),
             prefs.interests,
             prefs.mood_tags,
             prefs.avoid_crowded,
         )
-        yield _trace(
-            "getActivityOptions",
-            "fallback",
-            f"Live activity search returned too few usable options — switched to the curated catalogue ({len(activities)} options).",
-            int((time.monotonic() - t) * 1000),
-        )
+        if live_count == 0:
+            message = f"No live options matched your interests — falling back to a broad curated mix ({len(activities)} options)."
+        else:
+            message = f"Only {live_count} live option(s) matched — topping up with the curated catalogue ({len(activities)} options)."
+        yield _trace("getActivityOptions", "fallback", message, int((time.monotonic() - t) * 1000))
     else:
         yield _trace("getActivityOptions", "ok", f"Found {len(activities)} candidate activities via OpenStreetMap Overpass.", int((time.monotonic() - t) * 1000))
 
@@ -148,6 +165,7 @@ async def _continue(prefs: Preferences, force: bool, started: float) -> AsyncIte
             foods = []
     if len(foods) < 1:
         used_fallback = True
+        live_count = len(foods)
         foods = score_candidates(
             build_mock_food(prefs.city or "Your City"),
             ["food", "coffee"],
@@ -155,19 +173,19 @@ async def _continue(prefs: Preferences, force: bool, started: float) -> AsyncIte
             prefs.avoid_crowded,
             prefs.vegetarian,
         )
-        yield _trace(
-            "getFoodOptions",
-            "fallback",
-            f"Live food search came up short — using curated food options instead ({len(foods)} options).",
-            int((time.monotonic() - t) * 1000),
-        )
+        if live_count == 0:
+            message = f"No live food options came back — using the curated food list instead ({len(foods)} options)."
+        else:
+            message = f"Only {live_count} live food option(s) — topping up with curated food options ({len(foods)} options)."
+        yield _trace("getFoodOptions", "fallback", message, int((time.monotonic() - t) * 1000))
     else:
         yield _trace("getFoodOptions", "ok", f"Found {len(foods)} food options via OpenStreetMap Overpass.", int((time.monotonic() - t) * 1000))
 
     # --- draft -----------------------------------------------------------
     t = time.monotonic()
     yield _trace("generateFinalPlan", "running", "Drafting an itinerary and writing up why each stop fits…")
-    draft = generate_final_plan(activities, foods, prefs, used_fallback)
+    origin = (geo.lat, geo.lon) if geo is not None and geo.source == "osm" else None
+    draft = generate_final_plan(activities, foods, prefs, used_fallback, origin)
     yield _trace("generateFinalPlan", "ok", f"Drafted a {len(draft.items)}-stop plan.", int((time.monotonic() - t) * 1000))
 
     # --- cost ------------------------------------------------------------
@@ -204,29 +222,35 @@ async def _continue(prefs: Preferences, force: bool, started: float) -> AsyncIte
     yield {"type": "done"}
 
 
-async def run_agent(input_text: str, force: bool = False) -> AsyncIterator[dict[str, Any]]:
+async def run_agent(
+    input_text: str, force: bool = False, simulate_outage: bool = False
+) -> AsyncIterator[dict[str, Any]]:
     """Parse free text, then run the planner."""
     started = time.monotonic()
     t = time.monotonic()
     yield _trace("parseUserPreferences", "running", "Reading your request and pulling out the important bits…")
     prefs = parse_user_preferences(input_text)
     yield _trace("parseUserPreferences", "ok", _summarize_prefs(prefs), int((time.monotonic() - t) * 1000))
-    async for event in _continue(prefs, force, started):
+    async for event in _continue(prefs, force, started, simulate_outage):
         yield event
 
 
-async def run_agent_from_prefs(prefs: Preferences, force: bool = False) -> AsyncIterator[dict[str, Any]]:
+async def run_agent_from_prefs(
+    prefs: Preferences, force: bool = False, simulate_outage: bool = False
+) -> AsyncIterator[dict[str, Any]]:
     """Run the planner from an already-structured preferences object."""
     started = time.monotonic()
     yield _trace("parseUserPreferences", "ok", _summarize_prefs(prefs))
-    async for event in _continue(prefs, force, started):
+    async for event in _continue(prefs, force, started, simulate_outage):
         yield event
 
 
-async def run_agent_safe(input_text: str, force: bool = False) -> AsyncIterator[dict[str, Any]]:
+async def run_agent_safe(
+    input_text: str, force: bool = False, simulate_outage: bool = False
+) -> AsyncIterator[dict[str, Any]]:
     """Wrap :func:`run_agent` so an unexpected error becomes a streamed event."""
     try:
-        async for event in run_agent(input_text, force):
+        async for event in run_agent(input_text, force, simulate_outage):
             yield event
     except Exception as exc:  # noqa: BLE001
         yield {"type": "error", "message": f"The agent hit an unexpected error: {exc}"}

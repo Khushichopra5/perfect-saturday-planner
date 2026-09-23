@@ -15,7 +15,7 @@ TRAVEL_BUFFER_MINS = 20
 
 
 @dataclass
-class ValidationResult:
+class ValidationResult:  # noqa: D101
     warnings: list[str] = field(default_factory=list)
     drop_ids: list[str] = field(default_factory=list)
     travel_buffer_mins: int = 0
@@ -29,15 +29,14 @@ class ValidationResult:
 
 
 def plan_duration_mins(items: list[PlanItem]) -> int:
-    activity = sum(item.duration_mins for item in items)
-    travel = max(0, len(items) - 1) * TRAVEL_BUFFER_MINS
-    return activity + travel
+    """Total wall-clock time: time spent at stops plus travel between them."""
+    return sum(item.duration_mins for item in items) + sum(item.travel_mins for item in items)
 
 
 def validate_plan(items: list[PlanItem], prefs: Preferences, total_cost: int) -> ValidationResult:
     warnings: list[str] = []
     drop_ids: list[str] = []
-    travel_buffer_mins = max(0, len(items) - 1) * TRAVEL_BUFFER_MINS
+    travel_buffer_mins = sum(item.travel_mins for item in items)
 
     time_budget_mins = prefs.available_time_hours * 60
     duration = plan_duration_mins(items)
@@ -51,7 +50,7 @@ def validate_plan(items: list[PlanItem], prefs: Preferences, total_cost: int) ->
             if duration <= time_budget_mins:
                 break
             drop_ids.append(item.id)
-            duration -= item.duration_mins + TRAVEL_BUFFER_MINS
+            duration -= item.duration_mins + item.travel_mins
 
     if prefs.vegetarian:
         offenders = [i for i in items if i.kind == "food" and "vegetarian-friendly" not in i.tags]

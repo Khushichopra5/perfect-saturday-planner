@@ -1,5 +1,10 @@
 from planner.models import PlaceCandidate
-from planner.tools.cost import convert_cost, estimate_cost, estimate_item_cost, format_money
+from planner.tools.cost import (
+    convert_cost,
+    estimate_cost,
+    estimate_item_cost,
+    format_money,
+)
 
 
 def test_free_activity_costs_nothing(activities):

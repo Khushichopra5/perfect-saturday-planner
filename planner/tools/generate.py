@@ -1,16 +1,27 @@
 """Tool: generateFinalPlan.
 
 Takes the scored candidate pools plus the parsed preferences and assembles a
-sequenced, timed itinerary. Every stop carries a ``why`` explaining how it fits
-the user, which is what turns a list of places into a *plan*.
+sequenced, timed itinerary. This is where realism is enforced:
+
+* stops are ordered by proximity (no zig-zagging across the city),
+* travel time between stops is estimated from real coordinates,
+* places that are likely closed at their slot are swapped out,
+* every stop carries a ``why`` explaining how it fits the user.
 """
 
 from __future__ import annotations
 
+import re
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from ..models import Interest, PlaceCandidate, Plan, PlanItem, PlanItemKind, Preferences
 from .cost import estimate_item_cost, format_money
+from .geo import haversine_km, nearest_neighbour_order, travel_minutes
+from .hours import opening_status
+
+SATURDAY = 5
+DEFAULT_TRAVEL_MINS = 20
 
 DURATIONS: dict[str, int] = {
     "museum": 90,
@@ -89,8 +100,12 @@ def build_why(candidate: PlaceCandidate, prefs: Preferences, kind: PlanItemKind)
     if prefs.mood_tags and set(prefs.mood_tags) & {"relaxed", "cozy"}:
         if candidate.category in ("park", "garden", "cafe", "café", "library", "bookstore", "viewpoint"):
             reasons.append("it's low-key enough for a tired-but-fun mood")
-    if set(prefs.mood_tags) & {"social"} and candidate.category in ("bar", "music venue", "nightclub", "arcade", "bowling"):
+    if "social" in prefs.mood_tags and candidate.category in ("bar", "music venue", "nightclub", "arcade", "bowling"):
         reasons.append("it has a social, lively energy")
+    if "creative" in prefs.mood_tags and candidate.category in ("workshop", "arts centre", "gallery", "museum"):
+        reasons.append("it lets you make or see something creative")
+    if "romantic" in prefs.mood_tags and candidate.category in ("viewpoint", "waterfront", "garden", "cafe", "café"):
+        reasons.append("it's a nice, romantic setting")
     if prefs.avoid_crowded and candidate.crowd == "low":
         reasons.append("it tends to stay uncrowded")
     if prefs.vegetarian and kind == "food" and candidate.vegetarian_friendly:
@@ -113,6 +128,16 @@ def minutes_to_time(start_minutes: int) -> str:
     return f"{hours12}:{mins:02d} {suffix}"
 
 
+def time_to_minutes(value: str) -> int:
+    match = re.match(r"(\d{1,2}):(\d{2})\s*(AM|PM)", value.strip(), re.I)
+    if not match:
+        return 0
+    hours = int(match.group(1)) % 12
+    if match.group(3).upper() == "PM":
+        hours += 12
+    return hours * 60 + int(match.group(2))
+
+
 def _make_item(candidate: PlaceCandidate, kind: PlanItemKind, start_minutes: int, prefs: Preferences) -> PlanItem:
     cost = estimate_item_cost(candidate, prefs.currency)
     tags = [
@@ -123,6 +148,10 @@ def _make_item(candidate: PlaceCandidate, kind: PlanItemKind, start_minutes: int
         "live-data" if candidate.source == "osm" else "curated",
     ]
     description = candidate.category.capitalize() + (f" · {candidate.address}" if candidate.address else "")
+    hours = candidate.tags.get("opening_hours")
+    note = candidate.note
+    if not note and hours:
+        note = f"Opening hours: {hours}"
     return PlanItem(
         id=candidate.id,
         kind=kind,
@@ -137,7 +166,8 @@ def _make_item(candidate: PlaceCandidate, kind: PlanItemKind, start_minutes: int
         source=candidate.source,
         lat=candidate.lat,
         lon=candidate.lon,
-        note=candidate.note,
+        note=note,
+        opening_hours=hours,
     )
 
 
@@ -172,30 +202,104 @@ def _selection_for(hours: float) -> tuple[int, int, int]:
     return 1, 1, 13 * 60
 
 
+def _time_items(
+    sequence: list[tuple[PlaceCandidate, PlanItemKind]],
+    prefs: Preferences,
+    start_minutes: int,
+    origin: tuple[float, float] | None = None,
+) -> list[PlanItem]:
+    items: list[PlanItem] = []
+    cursor = start_minutes
+    prev = origin
+    for index, (candidate, kind) in enumerate(sequence):
+        distance = None
+        travel = 0
+        if candidate.lat is not None and candidate.lon is not None:
+            if prev is not None:
+                distance = haversine_km(prev[0], prev[1], candidate.lat, candidate.lon)
+                travel = travel_minutes(distance)
+        else:
+            travel = 0 if index == 0 else DEFAULT_TRAVEL_MINS
+
+        cursor += travel
+        item = _make_item(candidate, kind, cursor, prefs)
+        item.travel_mins = travel
+        item.distance_km = round(distance, 2) if distance is not None else None
+        items.append(item)
+        cursor += item.duration_mins
+
+        if candidate.lat is not None and candidate.lon is not None:
+            prev = (candidate.lat, candidate.lon)
+    return items
+
+
+def _resolve_closed(
+    sequence: list[tuple[PlaceCandidate, PlanItemKind]],
+    activities: list[PlaceCandidate],
+    foods: list[PlaceCandidate],
+    prefs: Preferences,
+    start_minutes: int,
+    origin: tuple[float, float] | None,
+) -> tuple[list[tuple[PlaceCandidate, PlanItemKind]], list[str], list[str]]:
+    """Swap out stops that are likely closed at their scheduled time."""
+    items = _time_items(sequence, prefs, start_minutes, origin)
+    used = {candidate.id for candidate, _ in sequence}
+    food_ids = {candidate.id for candidate in foods}
+    pool = list(activities) + list(foods)
+    new_sequence = list(sequence)
+    trades: list[str] = []
+    warnings: list[str] = []
+
+    for index, item in enumerate(items):
+        if not item.opening_hours:
+            continue
+        minutes = time_to_minutes(item.start_time)
+        if opening_status(item.opening_hours, SATURDAY, minutes) != "closed":
+            continue
+
+        candidate, kind = sequence[index]
+        replacement = None
+        for option in pool:
+            if option.id in used:
+                continue
+            option_kind = "food" if option.id in food_ids else "activity"
+            if option_kind != kind:
+                continue
+            if opening_status(option.tags.get("opening_hours"), SATURDAY, minutes) != "closed":
+                replacement = option
+                break
+
+        if replacement is not None:
+            new_sequence[index] = (replacement, kind)
+            used.discard(candidate.id)
+            used.add(replacement.id)
+            trades.append(
+                f"Swapped {candidate.name} → {replacement.name}: {candidate.name} looks closed around {item.start_time}."
+            )
+        else:
+            warnings.append(f"{item.title} may be closed around {item.start_time} — worth double-checking before you go.")
+
+    return new_sequence, trades, warnings
+
+
 def prune_plan(plan: Plan, drop_ids: list[str], prefs: Preferences) -> Plan:
-    """Remove dropped items and re-time the remaining stops."""
+    """Remove dropped items and re-time the remaining stops (keeping travel times)."""
     kept = [item for item in plan.items if item.id not in drop_ids]
     cursor = 10 * 60
     items: list[PlanItem] = []
     for item in kept:
-        item = PlanItem(**{**item.__dict__, "start_time": minutes_to_time(cursor)})
-        items.append(item)
-        cursor += item.duration_mins + 20
+        cursor += item.travel_mins
+        items.append(replace(item, start_time=minutes_to_time(cursor)))
+        cursor += item.duration_mins
     total_cost = sum(item.cost for item in items)
-    return Plan(
-        city=plan.city,
-        headline=plan.headline,
-        summary=plan.summary,
+    return replace(
+        plan,
         items=items,
         total_cost=total_cost,
-        budget=prefs.budget,
-        currency=prefs.currency,
         within_budget=True if prefs.budget is None else total_cost <= prefs.budget,
-        total_duration_mins=sum(i.duration_mins for i in items) + max(0, len(items) - 1) * 20,
+        total_duration_mins=sum(i.duration_mins for i in items) + sum(i.travel_mins for i in items),
         tradeoffs=list(plan.tradeoffs),
         warnings=list(plan.warnings),
-        source=plan.source,
-        generated_at=plan.generated_at,
     )
 
 
@@ -204,6 +308,7 @@ def generate_final_plan(
     foods: list[PlaceCandidate],
     prefs: Preferences,
     used_fallback: bool = False,
+    origin: tuple[float, float] | None = None,
 ) -> Plan:
     activity_count, food_count, start_minutes = _selection_for(prefs.available_time_hours)
 
@@ -223,23 +328,32 @@ def generate_final_plan(
         sequence.append((chosen_foods[food_index], "food"))
         food_index += 1
 
-    items: list[PlanItem] = []
-    cursor = start_minutes
-    for candidate, kind in sequence:
-        items.append(_make_item(candidate, kind, cursor, prefs))
-        cursor += duration_for(candidate, kind) + 20
+    if origin is not None:
+        sequence = nearest_neighbour_order(sequence, origin)
+
+    sequence, hour_trades, hour_warnings = _resolve_closed(
+        sequence, activities, foods, prefs, start_minutes, origin
+    )
+    items = _time_items(sequence, prefs, start_minutes, origin)
 
     total_cost = sum(item.cost for item in items)
     budget = prefs.budget
     within_budget = True if budget is None else total_cost <= budget
 
-    tradeoffs: list[str] = []
+    tradeoffs: list[str] = list(hour_trades)
     if budget is not None and total_cost > budget:
         priciest = max(items, key=lambda i: i.cost)
         tradeoffs.append(
             f"{priciest.title} is the biggest spend ({format_money(priciest.cost, prefs.currency)}). "
             f"It pushes you ~{format_money(total_cost - budget, prefs.currency)} over budget, but it's the "
             "strongest match for your mood. Drop it to stay comfortably within budget."
+        )
+    far = [i for i in items if i.distance_km is not None and i.distance_km > 6]
+    if far:
+        longest = max(far, key=lambda i: i.distance_km)
+        tradeoffs.append(
+            f"The hop to {longest.title} is the longest of the day (~{longest.distance_km:g} km, "
+            f"~{longest.travel_mins} min) — worth it for the fit, but plan the ride."
         )
     if used_fallback:
         tradeoffs.append(
@@ -260,9 +374,11 @@ def generate_final_plan(
 
     headline = f"Your {theme}Saturday in {prefs.city or 'the city'}"
     source_note = "curated picks" if used_fallback else "live OpenStreetMap places"
+    total_travel = sum(i.travel_mins for i in items)
     summary = (
         f"A {prefs.available_time_hours:g}h plan built around {interest_words or 'a bit of everything'} — "
-        f"{len(items)} stops, {source_note}, roughly {format_money(total_cost, prefs.currency)} total"
+        f"{len(items)} stops, {source_note}, roughly {format_money(total_cost, prefs.currency)} total, "
+        f"about {total_travel} min of travel"
         + (f" against your {format_money(budget, prefs.currency)} budget" if budget is not None else "")
         + "."
     )
@@ -280,9 +396,9 @@ def generate_final_plan(
         budget=budget,
         currency=prefs.currency,
         within_budget=within_budget,
-        total_duration_mins=sum(i.duration_mins for i in items) + max(0, len(items) - 1) * 20,
+        total_duration_mins=sum(i.duration_mins for i in items) + total_travel,
         tradeoffs=tradeoffs,
-        warnings=[],
+        warnings=list(hour_warnings),
         source=source,
         generated_at=datetime.now(timezone.utc).isoformat(),
     )

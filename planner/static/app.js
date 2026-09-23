@@ -3,6 +3,7 @@ const traceEl = document.getElementById("trace");
 const planEl = document.getElementById("plan");
 const goBtn = document.getElementById("go");
 const randomizeBtn = document.getElementById("randomize");
+const outageEl = document.getElementById("outage");
 
 const DOT_ICON = { ok: "✓", fallback: "!", error: "×", info: "i", running: "" };
 
@@ -103,9 +104,13 @@ function itemCard(item, currency) {
     .join("");
   const note = item.note ? `<div class="note">${esc(item.note)}</div>` : "";
   const cost = Number(item.cost) > 0 ? money(item.cost, currency) : "Free";
+  const travel =
+    item.travel_mins > 0
+      ? ` · ${item.travel_mins} min travel${item.distance_km ? ` (${item.distance_km} km)` : ""}`
+      : "";
   return (
     `<div class="card">` +
-    `<div class="time">${esc(item.start_time)} · ${esc(item.duration_mins)} min</div>` +
+    `<div class="time">${esc(item.start_time)} · ${esc(item.duration_mins)} min${esc(travel)}</div>` +
     `<h3>${esc(item.title)}</h3>` +
     `<p class="desc">${esc(item.description)}</p>` +
     `<div class="why">${esc(item.why)}</div>` +
@@ -169,7 +174,7 @@ async function runPlanner(force = false) {
     const res = await fetch("/api/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ input: text, force }),
+      body: JSON.stringify({ input: text, force, simulate_outage: Boolean(outageEl && outageEl.checked) }),
     });
 
     if (!res.ok) {

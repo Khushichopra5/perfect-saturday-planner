@@ -1,4 +1,8 @@
-from planner.tools.parse import detect_clarifications, parse_structured, parse_user_preferences
+from planner.tools.parse import (
+    detect_clarifications,
+    parse_structured,
+    parse_user_preferences,
+)
 
 
 def test_parses_the_assignment_example():

@@ -17,12 +17,12 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import httpx
 
-from ..data.mock_data import KnownCity, find_known_city
+from ..data.mock_data import find_known_city
 from ..models import Currency, Interest, MoodTag, PlaceCandidate, PlaceSource
 
 USER_AGENT = "PerfectSaturdayPlanner/1.0 (open-source Saturday planning demo)"

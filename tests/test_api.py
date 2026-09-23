@@ -81,6 +81,21 @@ def test_clarifying_then_force():
     assert any(e["type"] == "plan" for e in forced)
 
 
+def test_simulate_outage_flag_degrades_gracefully():
+    resp = client.post(
+        "/api/plan",
+        json={
+            "input": "Bangalore, ₹2000, 4 hours, relaxed, food and walks",
+            "force": True,
+            "simulate_outage": True,
+        },
+    )
+    events = parse_sse(resp.text)
+    plan = next(e["plan"] for e in events if e["type"] == "plan")
+    assert plan["source"] == "mock"
+    assert any(e["type"] == "trace" and e["step"]["status"] == "fallback" for e in events)
+
+
 def test_empty_body_returns_400():
     assert client.post("/api/plan", json={}).status_code == 400
 

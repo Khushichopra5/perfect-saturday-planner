@@ -99,6 +99,9 @@ class PlanItem:
     lon: Optional[float] = None
     over_budget: bool = False
     note: Optional[str] = None
+    travel_mins: int = 0
+    distance_km: Optional[float] = None
+    opening_hours: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

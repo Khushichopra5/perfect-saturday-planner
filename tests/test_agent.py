@@ -70,6 +70,26 @@ async def test_vegetarian_constraint_is_respected():
     assert all("not-vegetarian" not in i["tags"] for i in food_items)
 
 
+async def test_simulated_outage_uses_curated_fallback():
+    events = await collect(
+        run_agent("Bangalore, ₹2000, 4 hours, relaxed, food and walks", force=True, simulate_outage=True)
+    )
+    plan = next(e["plan"] for e in events if e["type"] == "plan")
+    assert plan["source"] == "mock"
+    assert any(
+        e["type"] == "trace" and "simulated" in e["step"]["message"].lower() for e in events
+    )
+
+
+async def test_plan_includes_travel_and_why():
+    events = await collect(
+        run_agent("Bangalore, ₹2000, 4 hours, relaxed, food music walks", force=True)
+    )
+    plan = next(e["plan"] for e in events if e["type"] == "plan")
+    assert all("why" in item and item["why"] for item in plan["items"])
+    assert all("travel_mins" in item for item in plan["items"])
+
+
 def test_parse_payload_free_text():
     text, prefs = parse_payload({"input": "hello"})
     assert text == "hello"

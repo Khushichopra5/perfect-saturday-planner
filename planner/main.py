@@ -73,12 +73,17 @@ async def plan(request: Request) -> StreamingResponse | JSONResponse:
         return JSONResponse({"error": "Request body must be a JSON object"}, status_code=400)
 
     force = bool(payload.get("force"))
+    simulate_outage = bool(payload.get("simulate_outage"))
     text, prefs = parse_payload(payload)
 
     if text is None and prefs is None:
         return JSONResponse({"error": "Please describe your Saturday first."}, status_code=400)
 
-    events = run_agent_safe(text, force) if text is not None else run_agent_from_prefs(prefs, force)  # type: ignore[arg-type]
+    events = (
+        run_agent_safe(text, force, simulate_outage)
+        if text is not None
+        else run_agent_from_prefs(prefs, force, simulate_outage)  # type: ignore[arg-type]
+    )
     return StreamingResponse(
         _stream(events),
         media_type="text/event-stream",

@@ -137,6 +137,7 @@ def main() -> int:
             harness.check("plan has stops", len(plan["items"]) >= 1, str(len(plan["items"])))
             harness.check("every stop explains itself", all(i["why"] for i in plan["items"]))
             harness.check("cost equals sum of items", plan["total_cost"] == sum(i["cost"] for i in plan["items"]))
+            harness.check("stops carry travel estimates", all("travel_mins" in i for i in plan["items"]))
             harness.check("plan has a trace of tools", len([e for e in events if e["type"] == "trace"]) >= 6)
 
         print("\nStructured brief input")
@@ -166,6 +167,19 @@ def main() -> int:
         _, forced = stream_plan(base, {"input": "plan my saturday", "force": True})
         harness.check("force proceeds to a plan", any(e["type"] == "plan" for e in forced))
 
+        print("\nSimulated outage (graceful degradation)")
+        _, events = stream_plan(
+            base,
+            {"input": "Bangalore, ₹2000, 4 hours, relaxed, food and walks", "force": True, "simulate_outage": True},
+        )
+        plan = next((e["plan"] for e in events if e["type"] == "plan"), None)
+        harness.check("outage still yields a plan", plan is not None)
+        harness.check("outage plan uses curated data", bool(plan) and plan["source"] == "mock")
+        harness.check(
+            "outage is visible in the trace",
+            any(e["type"] == "trace" and e["step"]["status"] == "fallback" for e in events),
+        )
+
         print("\nFailure handling")
         harness.check("empty body -> 400", httpx.post(f"{base}/api/plan", json={}, timeout=5).status_code == 400)
         harness.check(
@@ -191,7 +205,9 @@ def main() -> int:
             harness.check("live run still produces a plan", plan is not None)
             if plan:
                 harness.check("plan cites its data source", plan["source"] in ("osm", "mixed", "mock"), plan["source"])
+                harness.check("real stops include distances", any(i["distance_km"] for i in plan["items"]))
                 print(f"        source={plan['source']} stops={[i['title'] for i in plan['items']]}")
+                print(f"        travel={[i['travel_mins'] for i in plan['items']]} min")
 
     finally:
         server.terminate()

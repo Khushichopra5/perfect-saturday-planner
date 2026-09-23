@@ -2,7 +2,7 @@ from planner.models import PlanItem
 from planner.tools.validate import plan_duration_mins, validate_plan
 
 
-def make_item(item_id, kind, duration, cost=0, tags=None):
+def make_item(item_id, kind, duration, cost=0, tags=None, travel_mins=0):
     return PlanItem(
         id=item_id,
         kind=kind,
@@ -15,11 +15,12 @@ def make_item(item_id, kind, duration, cost=0, tags=None):
         tags=tags or [],
         why="",
         source="mock",
+        travel_mins=travel_mins,
     )
 
 
-def test_plan_duration_includes_travel_buffer():
-    items = [make_item("a", "activity", 60), make_item("b", "food", 60)]
+def test_plan_duration_includes_travel_time():
+    items = [make_item("a", "activity", 60), make_item("b", "food", 60, travel_mins=20)]
     assert plan_duration_mins(items) == 140
 
 

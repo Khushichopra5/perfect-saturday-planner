@@ -12,31 +12,46 @@ avoid crowded places.
 ```
 
 The agent parses that, looks up **real places on OpenStreetMap**, builds a timed
-itinerary, explains why each stop fits, checks it against your time/budget/constraints,
-and streams its thinking to the browser as it goes.
+itinerary ordered by proximity, explains why each stop fits, checks it against your
+time/budget/constraints, and streams its thinking to the browser as it goes.
 
 ---
 
-## What it does
+## Requirement coverage
 
-| Requirement | How it's met |
+### Required behaviour
+
+| Requirement | Where it lives |
 | --- | --- |
-| Hosted UI | FastAPI + a single-page UI, SSE streaming, one-click deploy configs included |
-| Understands preferences | `parseUserPreferences` handles free text **and** the structured JSON brief |
-| At least 3 tools | 6 tools, no giant prompt (see below) |
-| Realistic, specific plan | Real OSM places, timed with travel buffers, sized to your available hours |
-| Explains each part | Every stop carries a `why` written from your mood, interests and constraints |
-| Handles a failure gracefully | Multiple failure paths, all user-visible (see below) |
-| Shows a trace | Live "agent is thinking" stream of each tool call, status and duration |
+| **Hosted UI** | FastAPI + single-page UI with SSE streaming; `Dockerfile`, `render.yaml`, `Procfile` included |
+| **Understands preferences** | `parseUserPreferences` handles free text **and** the exact structured JSON brief |
+| **≥ 3 tools/functions** | 8 tools, no giant prompt (below) |
+| **Realistic, specific plan** | Real OSM places, ordered by real distance, timed with travel buffers, sized to your hours |
+| **Explains why each part fits** | Every stop carries a `why` built from your mood, interests and constraints |
+| **Handles a failure case** | Six distinct failure paths, all visible in the trace (below) |
+| **Shows a trace** | Live "agent is thinking" stream of each tool call, its status and duration |
 
-### Tools (each independently testable)
+### Bonus points
+
+| Bonus | How it's done |
+| --- | --- |
+| **Real data instead of mocks** | OpenStreetMap **Overpass** for places + **Nominatim** for geocoding *and* as a second POI source. No API keys. |
+| **Streaming trace** | Server-Sent Events; the UI updates each step from spinner → result with timings. |
+| **Fallback plan when nothing matches** | Layered: Overpass → Nominatim → curated catalogue, with an explicit "no live options matched" message. |
+| **1–2 clarifying questions when vague** | `detectClarifications` asks at most two, and the UI offers one-tap answers plus a "plan anyway" escape. |
+| **Explains trade-offs** | Over-budget, time-trimmed, crowd-flagged, vegetarian substitutions, long hops, and closed-place swaps. |
+| **Avoids unrealistic suggestions** | Real travel times + nearest-neighbour ordering + **opening-hours** checks that swap out likely-closed venues. |
+
+### Tools (each independently unit-tested)
 
 1. `parseUserPreferences(input)` — free text or structured → normalised `Preferences`, plus documented assumptions.
-2. `geocodeCity(city)` — OpenStreetMap **Nominatim**, with an offline city index fallback.
-3. `getActivityOptions(city, interests, mood, constraints)` — OSM **Overpass**, then Nominatim POI search, then a curated catalogue.
+2. `geocodeCity(city)` — Nominatim, with an offline city index fallback.
+3. `getActivityOptions(city, interests, mood, constraints)` — Overpass → Nominatim POI search → curated catalogue.
 4. `getFoodOptions(city, budget, constraints)` — same layered approach, vegetarian-aware.
-5. `estimateCost(plan, budget)` — uses real `charge`/`fee` tags when present, then curated costs, then category defaults.
-6. `validatePlan(plan, constraints)` + `generateFinalPlan(context)` — self-checks time/budget/constraints, then trims and re-times.
+5. `estimateCost(plan, budget)` — real `charge`/`fee` tags when present, then curated costs, then category defaults.
+6. `validatePlan(plan, constraints)` — checks time (incl. travel), budget, vegetarian and crowd constraints.
+7. `generateFinalPlan(context)` — orders by proximity, times the day, swaps closed stops, writes the "why".
+8. `openingHours` / `geo` helpers — parse OSM `opening_hours` and compute haversine distance + travel time.
 
 The agent (`planner/agent.py`) is only an orchestrator: it decides the order and
 streams events. All the intelligence lives in small, unit-tested tools.
@@ -48,11 +63,16 @@ streams events. All the intelligence lives in small, unit-tested tools.
 - **City not found / no city** → builds a sensible template plan and says so.
 - **Overpass down or rate-limited (504s happen)** → automatically falls back to a
   Nominatim POI search for real places, then to a curated catalogue.
-- **Too few options for your interests** → broadens to the curated catalogue.
+- **No options match your interests** → broadens to the curated catalogue and says so.
 - **Plan runs over your time window** → trims the least essential stop and re-times.
 - **Vegetarian constraint violated** → drops the offending food stop.
+- **A venue looks closed at its slot** → swaps it for the next best open option.
 - **Over budget** → keeps the plan but explains the trade-off and what to drop.
 - **Anything unexpected** → streamed as an `error` event; the server never crashes.
+
+You can see all of this without breaking anything: the UI has a
+**"Simulate a live-data outage"** toggle (or send `"simulate_outage": true`) that
+forces the graceful-degradation path.
 
 ---
 
@@ -92,7 +112,7 @@ cp .env.example .env   # then fill in OPENAI_API_KEY
 ## Test
 
 ```bash
-# unit + in-process API tests (52 tests, offline & deterministic)
+# unit + in-process API tests (69 tests, offline & deterministic)
 pytest -q
 
 # true end-to-end: boots a real uvicorn server and streams from it
@@ -100,8 +120,8 @@ python scripts/e2e_live.py          # offline
 python scripts/e2e_live.py --live   # hits real OpenStreetMap
 ```
 
-Both suites pass: **52/52** pytest, **23/23** live-server checks (including real
-OpenStreetMap data).
+Both suites pass: **69/69** pytest, **28/28** live-server checks (including real
+OpenStreetMap data and real travel distances).
 
 ---
 
@@ -130,8 +150,10 @@ curl -N -X POST localhost:8000/api/plan \
   }'
 ```
 
-Responses are `text/event-stream` with `trace`, `clarify`, `plan`, `error` and
-`done` events. `GET /health` is the health check.
+Optional fields: `"force": true` (skip clarifying questions) and
+`"simulate_outage": true` (demo the fallback). Responses are `text/event-stream`
+with `trace`, `clarify`, `plan`, `error` and `done` events. `GET /health` is the
+health check.
 
 ---
 
@@ -145,8 +167,8 @@ browser  ──POST /api/plan──▶  FastAPI (planner/main.py)
                                     │
         ┌───────────────────────────┼───────────────────────────┐
         ▼                           ▼                           ▼
-  parse.py (prefs)         places.py (OSM live)         cost / validate /
-                     Overpass ▶ Nominatim ▶ catalogue   generate (planning)
+  parse.py (prefs)         places.py (OSM live)         cost / geo / hours /
+                     Overpass ▶ Nominatim ▶ catalogue   validate / generate
 ```
 
 ```
@@ -156,7 +178,7 @@ planner/
 ├── llm.py           optional LLM narrator (off by default)
 ├── models.py        dataclasses
 ├── data/mock_data.py  known cities + curated catalogue
-├── tools/           parse, places, cost, validate, generate
+├── tools/           parse, places, cost, geo, hours, validate, generate
 └── static/          index.html, styles.css, app.js
 ```
 
@@ -188,6 +210,8 @@ keyless; only the optional LLM narrator needs a key.
 - Public Overpass instances are occasionally slow (504). That is exactly why
   there are two live sources and a curated fallback — the plan always renders.
 - Costs are estimates (OSM `charge` tags are sparse); they are labelled as estimates.
+- Opening hours are parsed from a common subset of the OSM spec; anything unclear
+  is treated as "unknown" rather than guessed.
 - The LLM narrator is intentionally optional: the itinerary itself is deterministic
   so it is reproducible and testable.
 
