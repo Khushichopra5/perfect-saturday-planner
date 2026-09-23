@@ -3,7 +3,10 @@
 An AI agent that turns a one-line request into a realistic, timed Saturday plan —
 with a live trace of every step it took.
 
-> **Live URL:** _add the deployed URL here_ (see [Deploy](#deploy) — one-click Render/Railway/Fly/Docker).
+> **Live URL:** **https://perfect-saturday-planner.onrender.com**
+> **Repo:** https://github.com/Khushichopra5/perfect-saturday-planner
+>
+> _Render's free tier sleeps after inactivity — the first load can take ~30–60s to wake up._
 
 ```
 I'm in Bangalore with about ₹2000 and 4 hours. I'm tired but want to do
