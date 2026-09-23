@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Perfect Saturday Planner</title>
+    <meta
+      name="description"
+      content="An AI agent that plans a perfect Saturday from your city, budget, mood, interests and constraints."
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <span class="badge">AI Saturday Agent</span>
+        <h1>Plan a perfect Saturday</h1>
+        <p>
+          Tell me your city, budget, how much time you have, your mood and any constraints.
+          I'll search real places, build a timed plan, explain why each stop fits, and show you exactly
+          what I did along the way.
+        </p>
+      </header>
+
+      <div class="grid">
+        <section class="panel">
+          <h2>Your Saturday</h2>
+          <textarea id="input" placeholder="e.g. I'm in Bangalore with about ₹2000 and 4 hours. I'm tired but want to do something fun. I like food, music and walks. I'm vegetarian and want to avoid crowded places."></textarea>
+
+          <div class="chips" id="examples">
+            <button class="chip" data-example="Bangalore, ₹2000, 4 hours, tired but wants to do something fun, into food music and walks, vegetarian and avoid crowded places">Bangalore · tired · ₹2000</button>
+            <button class="chip" data-example="New York, $60, 6 hours, energetic and social, love art, history and coffee, no constraints">New York · social · $60</button>
+            <button class="chip" data-example="Mumbai, 3 hours, cozy and relaxed, books and coffee, avoid crowds">Mumbai · cozy · 3h</button>
+            <button class="chip" data-example="Paris, 5 hours, romantic, art and food, no constraints">Paris · romantic</button>
+          </div>
+
+          <button class="primary" id="go">Plan my Saturday</button>
+          <button class="ghost" id="randomize" type="button">Surprise me</button>
+
+          <p class="footnote">
+            Free text works best, but you can also POST structured JSON to <code>/api/plan</code>
+            with <code>city</code>, <code>budget</code>, <code>available_time</code>, <code>mood</code>,
+            <code>interests</code> and <code>constraints</code>.
+          </p>
+        </section>
+
+        <section class="panel">
+          <h2>Agent trace</h2>
+          <div class="trace" id="trace">
+            <p class="empty">Your agent's steps will stream here as it works.</p>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel result" id="result">
+        <h2>Your plan</h2>
+        <div id="plan">
+          <p class="empty">No plan yet — describe your Saturday and hit “Plan my Saturday”.</p>
+        </div>
+      </section>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
