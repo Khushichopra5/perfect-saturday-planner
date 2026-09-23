@@ -1,5 +1,7 @@
 # Perfect Saturday Planner
 
+[![CI / CD](https://github.com/Khushichopra5/perfect-saturday-planner/actions/workflows/deploy.yml/badge.svg)](https://github.com/Khushichopra5/perfect-saturday-planner/actions/workflows/deploy.yml)
+
 An AI agent that turns a one-line request into a realistic, timed Saturday plan —
 with a live trace of every step it took.
 
@@ -189,10 +191,29 @@ planner/
 
 ## Deploy
 
-The app is a standard ASGI app, so it runs anywhere. Fastest options:
+### Continuous deployment (how this repo is wired)
 
-**Render** (free tier): push to GitHub → New → Blueprint → pick the repo. The
-included `render.yaml` sets the build/start commands and health check.
+Every push to `main` runs `.github/workflows/deploy.yml`, which:
+
+1. installs dependencies, runs `ruff`, `pytest`, and the offline end-to-end suite;
+2. if all green, calls the Render API to trigger a deploy:
+
+   ```
+   POST https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys
+   Authorization: Bearer $RENDER_API_KEY
+   ```
+
+The Render API key and service ID live in GitHub Actions **repository secrets**
+(`RENDER_API_KEY`, `RENDER_SERVICE_ID`) — never in the code. So `git push` →
+tests pass → the live URL updates automatically. You can watch runs on the
+[Actions tab](https://github.com/Khushichopra5/perfect-saturday-planner/actions).
+
+### Deploying elsewhere
+
+The app is a standard ASGI app, so it runs anywhere:
+
+**Render** (free tier): New → Blueprint → pick the repo. The included
+`render.yaml` sets the build/start commands and health check.
 
 **Railway / Fly / Heroku**: use the included `Procfile` or `Dockerfile`.
 
