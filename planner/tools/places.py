@@ -24,6 +24,7 @@ import httpx
 
 from ..data.mock_data import find_known_city
 from ..models import FOOD_CATEGORIES, Currency, Interest, MoodTag, PlaceCandidate, PlaceSource
+from .geo import haversine_km
 
 USER_AGENT = "PerfectSaturdayPlanner/1.0 (open-source Saturday planning demo)"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
@@ -377,12 +378,22 @@ INTEREST_SEARCH_TERMS: dict[Interest, str] = {
 POI_CLASSES = {"amenity", "tourism", "leisure", "shop", "historic", "natural"}
 
 
-async def _nominatim_pois(city: str, terms: list[str], limit: int = 20) -> list[dict[str, Any]]:
+async def _nominatim_pois(
+    city: str,
+    terms: list[str],
+    limit: int = 20,
+    origin: tuple[float, float] | None = None,
+    max_km: float = 30.0,
+) -> list[dict[str, Any]]:
     """Second live source: search named POIs via Nominatim.
 
     Overpass occasionally 504s under load; Nominatim is the same free
     OpenStreetMap ecosystem and much more reliable, so we use it as a backup.
     We honour its 1 request/second policy with a small sleep between calls.
+
+    A free-text search like "restaurant in New York" happily returns places in
+    neighbouring towns, so when we have the city's coordinates we drop anything
+    outside ``max_km``.
     """
     if offline():
         return []
@@ -404,14 +415,19 @@ async def _nominatim_pois(city: str, terms: list[str], limit: int = 20) -> list[
                 klass = item.get("category") or item.get("class") or ""
                 if klass not in POI_CLASSES or not item.get("name"):
                     continue
+                lat = float(item["lat"]) if item.get("lat") else None
+                lon = float(item["lon"]) if item.get("lon") else None
+                if origin is not None and lat is not None and lon is not None:
+                    if haversine_km(origin[0], origin[1], lat, lon) > max_km:
+                        continue
                 tags: dict[str, str] = {klass: str(item.get("type", ""))}
                 tags.update({k: str(v) for k, v in (item.get("extratags") or {}).items()})
                 results.append(
                     {
                         "id": item.get("place_id"),
                         "name": item["name"],
-                        "lat": float(item["lat"]) if item.get("lat") else None,
-                        "lon": float(item["lon"]) if item.get("lon") else None,
+                        "lat": lat,
+                        "lon": lon,
                         "tags": tags,
                         "address": (item.get("address") or {}).get("road"),
                     }
@@ -498,7 +514,7 @@ async def get_activity_options(
     if len(items) < 2:
         try:
             terms = [INTEREST_SEARCH_TERMS.get(i, "attraction") for i in wanted]
-            pois = await _nominatim_pois(geo.name, terms)
+            pois = await _nominatim_pois(geo.name, terms, origin=(geo.lat, geo.lon))
             fallback = _dedupe([_candidate_from_poi(p, "osmp", wanted, mood_tags, avoid_crowded, False) for p in pois])
             if fallback:
                 provider = "overpass+nominatim" if items else "nominatim"
@@ -532,7 +548,7 @@ async def get_food_options(
 
     if len(items) < 1:
         try:
-            pois = await _nominatim_pois(geo.name, ["restaurant", "cafe"])
+            pois = await _nominatim_pois(geo.name, ["restaurant", "cafe"], origin=(geo.lat, geo.lon))
             fallback = _dedupe([_candidate_from_poi(p, "osmp-food", ["food", "coffee"], [], avoid_crowded, vegetarian) for p in pois])
             if fallback:
                 provider = "overpass+nominatim" if items else "nominatim"

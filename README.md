@@ -136,7 +136,7 @@ cp .env.example .env   # then fill in OPENAI_API_KEY
 ## Test
 
 ```bash
-# unit + in-process API tests (69 tests, offline & deterministic)
+# unit + in-process API tests (offline & deterministic)
 pytest -q
 
 # true end-to-end: boots a real uvicorn server and streams from it
@@ -147,7 +147,7 @@ python scripts/e2e_live.py --live   # real OpenStreetMap — 28/28 checks
 python scripts/e2e_live.py --url https://perfect-saturday-planner.onrender.com
 ```
 
-Both pass: **69/69** pytest, **25/25** offline e2e checks, and **28/28** live
+Both pass: **91/91** pytest, **25/25** offline e2e checks, and **28/28** live
 checks (the extra 3 are the real OpenStreetMap assertions).
 
 ---

@@ -105,7 +105,7 @@ async def test_activity_provider_is_nominatim_when_overpass_fails(monkeypatch):
     async def failing_overpass(query):
         raise RuntimeError("overpass down")
 
-    async def fake_pois(city, terms, limit=20):
+    async def fake_pois(city, terms, limit=20, origin=None, max_km=30.0):
         return [
             _poi(10, "Quiet Park", {"leisure": "park"}),
             _poi(11, "City Museum", {"tourism": "museum"}),
@@ -151,3 +151,41 @@ async def test_food_options_keep_only_food_categories(monkeypatch):
     names = {c.name for c in result.items}
     assert "Veg Kitchen" in names
     assert "Corner Bar" not in names
+
+
+async def test_nominatim_pois_drops_out_of_city_results(monkeypatch):
+    monkeypatch.setattr(places_mod, "offline", lambda: False)
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(places_mod.asyncio, "sleep", no_sleep)
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return [
+                # ~0 km from the origin
+                {"place_id": 1, "name": "Near Cafe", "lat": "12.9716", "lon": "77.5946", "category": "amenity", "type": "cafe", "extratags": {}},
+                # ~70 km away (e.g. a neighbouring town)
+                {"place_id": 2, "name": "Far Cafe", "lat": "13.5", "lon": "78.0", "category": "amenity", "type": "cafe", "extratags": {}},
+            ]
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(places_mod.httpx, "AsyncClient", FakeClient)
+
+    results = await places_mod._nominatim_pois("Bangalore", ["cafe"], origin=(12.9716, 77.5946), max_km=30.0)
+    assert [r["name"] for r in results] == ["Near Cafe"]

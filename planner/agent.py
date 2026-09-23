@@ -229,7 +229,7 @@ async def _continue(
     validation = validate_plan(draft.items, prefs, cost.total)
     plan = draft
     if validation.drop_ids:
-        plan = prune_plan(draft, validation.drop_ids, prefs)
+        plan = prune_plan(draft, validation.drop_ids, prefs, used_fallback)
         yield _trace("validatePlan", "fallback", f"Adjusted the plan to respect your constraints ({len(validation.drop_ids)} change(s)).", int((time.monotonic() - t) * 1000))
     else:
         yield _trace("validatePlan", "ok", "Plan fits your time, budget and constraints.", int((time.monotonic() - t) * 1000))

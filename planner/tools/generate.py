@@ -92,6 +92,36 @@ def interest_label(interest: Interest) -> str:
     return INTEREST_LABELS.get(interest, interest)
 
 
+def _source_of(items: list[PlanItem]) -> str:
+    sources = {item.source for item in items}
+    if sources == {"osm"}:
+        return "osm"
+    if sources == {"mock"}:
+        return "mock"
+    return "mixed"
+
+
+def _build_summary(items: list[PlanItem], prefs: Preferences) -> str:
+    total_cost = sum(i.cost for i in items)
+    total_travel = sum(i.travel_mins for i in items)
+    interest_words = ", ".join(interest_label(i) for i in prefs.interests[:3])
+    source_note = {
+        "osm": "live OpenStreetMap places",
+        "mock": "curated picks",
+        "mixed": "a mix of live OpenStreetMap places and curated picks",
+    }[_source_of(items)]
+    summary = (
+        f"A {prefs.available_time_hours:g}h plan built around {interest_words or 'a bit of everything'} — "
+        f"{len(items)} stops, {source_note}, roughly {format_money(total_cost, prefs.currency)} total, "
+        f"about {total_travel} min of travel"
+        + (f" against your {format_money(prefs.budget, prefs.currency)} budget" if prefs.budget is not None else "")
+        + "."
+    )
+    if prefs.constraints:
+        summary += f" Kept to your constraints: {', '.join(prefs.constraints)}."
+    return summary
+
+
 def build_why(candidate: PlaceCandidate, prefs: Preferences, kind: PlanItemKind) -> str:
     reasons: list[str] = []
     matched = [i for i in candidate.interests if i in prefs.interests]
@@ -99,7 +129,7 @@ def build_why(candidate: PlaceCandidate, prefs: Preferences, kind: PlanItemKind)
         reasons.append(f"it lines up with your interest in {' & '.join(interest_label(i) for i in matched)}")
     if prefs.mood_tags and set(prefs.mood_tags) & {"relaxed", "cozy"}:
         if candidate.category in ("park", "garden", "cafe", "café", "library", "bookstore", "viewpoint"):
-            reasons.append("it's low-key enough for a tired-but-fun mood")
+            reasons.append(f"it's low-key enough for the {prefs.mood or 'relaxed'} mood you mentioned")
     if "social" in prefs.mood_tags and candidate.category in ("bar", "music venue", "nightclub", "arcade", "bowling"):
         reasons.append("it has a social, lively energy")
     if "creative" in prefs.mood_tags and candidate.category in ("workshop", "arts centre", "gallery", "museum"):
@@ -158,7 +188,7 @@ def _make_item(candidate: PlaceCandidate, kind: PlanItemKind, start_minutes: int
         kind=kind,
         title=candidate.name,
         description=description,
-        location=prefs.city or "your city",
+        location=candidate.address or prefs.city or "your city",
         start_time=minutes_to_time(start_minutes),
         duration_mins=duration_for(candidate, kind),
         cost=cost,
@@ -188,11 +218,38 @@ def _choose_activities(activities: list[PlaceCandidate], prefs: Preferences, cou
     chosen: list[PlaceCandidate] = []
     remaining = list(activities)
     covered: set[Interest] = set()
+    chosen_categories: set[str] = set()
     while remaining and len(chosen) < count:
-        remaining.sort(key=lambda c: (-len((set(c.interests) & wanted) - covered), -c.score))
+        remaining.sort(
+            key=lambda c: (
+                -len((set(c.interests) & wanted) - covered),  # cover a new interest first
+                c.category in chosen_categories,  # then prefer a new category
+                -c.score,
+            )
+        )
         best = remaining.pop(0)
         chosen.append(best)
         covered |= set(best.interests) & wanted
+        chosen_categories.add(best.category)
+    return chosen
+
+
+def _pick_diverse_categories(items: list[PlaceCandidate], count: int) -> list[PlaceCandidate]:
+    """Pick up to ``count`` items, preferring distinct categories."""
+    chosen: list[PlaceCandidate] = []
+    seen: set[str] = set()
+    for candidate in items:
+        if candidate.category in seen:
+            continue
+        chosen.append(candidate)
+        seen.add(candidate.category)
+        if len(chosen) >= count:
+            return chosen
+    for candidate in items:
+        if candidate not in chosen:
+            chosen.append(candidate)
+            if len(chosen) >= count:
+                break
     return chosen
 
 
@@ -287,10 +344,15 @@ def _resolve_closed(
     return new_sequence, trades, warnings
 
 
-def prune_plan(plan: Plan, drop_ids: list[str], prefs: Preferences) -> Plan:
+def prune_plan(plan: Plan, drop_ids: list[str], prefs: Preferences, used_fallback: bool = False) -> Plan:
     """Remove dropped items and re-time the remaining stops (keeping travel times)."""
     kept = [item for item in plan.items if item.id not in drop_ids]
-    cursor = 10 * 60
+    # Keep the original start-of-day rather than resetting to 10:00.
+    if plan.items:
+        base = time_to_minutes(plan.items[0].start_time) - plan.items[0].travel_mins
+    else:
+        base = 10 * 60
+    cursor = base
     items: list[PlanItem] = []
     for item in kept:
         cursor += item.travel_mins
@@ -300,6 +362,7 @@ def prune_plan(plan: Plan, drop_ids: list[str], prefs: Preferences) -> Plan:
     return replace(
         plan,
         items=items,
+        summary=_build_summary(items, prefs),
         total_cost=total_cost,
         within_budget=True if prefs.budget is None else total_cost <= prefs.budget,
         total_duration_mins=sum(i.duration_mins for i in items) + sum(i.travel_mins for i in items),
@@ -318,7 +381,7 @@ def generate_final_plan(
     activity_count, food_count, start_minutes = _selection_for(prefs.available_time_hours)
 
     chosen_activities = _choose_activities(activities, prefs, activity_count)
-    chosen_foods = foods[:food_count]
+    chosen_foods = _pick_diverse_categories(foods, food_count)
 
     sequence: list[tuple[PlaceCandidate, PlanItemKind]] = []
     max_len = max(len(chosen_activities), len(chosen_foods))
@@ -358,22 +421,12 @@ def generate_final_plan(
     if "creative" in prefs.mood_tags:
         theme_bits.append("creative")
     theme = (" ".join(theme_bits) + " ") if theme_bits else ""
-    interest_words = ", ".join(interest_label(i) for i in prefs.interests[:3])
 
     headline = f"Your {theme}Saturday in {prefs.city or 'the city'}"
-    source_note = "curated picks" if used_fallback else "live OpenStreetMap places"
+    summary = _build_summary(items, prefs)
     total_travel = sum(i.travel_mins for i in items)
-    summary = (
-        f"A {prefs.available_time_hours:g}h plan built around {interest_words or 'a bit of everything'} — "
-        f"{len(items)} stops, {source_note}, roughly {format_money(total_cost, prefs.currency)} total, "
-        f"about {total_travel} min of travel"
-        + (f" against your {format_money(budget, prefs.currency)} budget" if budget is not None else "")
-        + "."
-    )
-    if prefs.constraints:
-        summary += f" Kept to your constraints: {', '.join(prefs.constraints)}."
 
-    source = "mock" if used_fallback else ("mixed" if any(i.source == "mock" for i in items) else "osm")
+    source = _source_of(items)
 
     plan = Plan(
         city=prefs.city or "your city",
@@ -423,14 +476,19 @@ def build_tradeoffs(
             tradeoffs.append(f"Skipped {skipped_busy[0].name} — it's usually busy, and you asked to avoid crowds.")
 
     covered_interests = {tag for item in plan.items for tag in item.tags} & set(prefs.interests)
-    # Only call an interest "uncovered" if no candidate matched it at all — if one
-    # existed but was trimmed for time, the time warning already explains that.
     available_interests = {i for c in (list(activities) + list(foods)) for i in c.interests} & set(prefs.interests)
-    uncovered = [i for i in prefs.interests if i not in covered_interests and i not in available_interests]
-    if uncovered and covered_interests:
+    uncovered = [i for i in prefs.interests if i not in covered_interests]
+    no_option = [i for i in uncovered if i not in available_interests]
+    dropped = [i for i in uncovered if i in available_interests]
+    if no_option and covered_interests:
         tradeoffs.append(
-            f"No strong {', '.join(uncovered)} option nearby was a good fit, so the day leans on "
+            f"No strong {', '.join(no_option)} option nearby was a good fit, so the day leans on "
             f"{', '.join(i for i in prefs.interests if i in covered_interests)} instead."
+        )
+    if dropped:
+        tradeoffs.append(
+            f"Only {len(plan.items)} stops fit in {prefs.available_time_hours:g}h, so "
+            f"{', '.join(dropped)} didn't make the cut — add more time to include them."
         )
 
     far = [i for i in plan.items if i.distance_km is not None and i.distance_km > 6]
@@ -441,8 +499,12 @@ def build_tradeoffs(
             f"~{longest.travel_mins} min) — worth it for the fit, but plan the ride."
         )
 
-    if used_fallback:
+    if plan.source == "mock":
         tradeoffs.append(
             "Live place data was unavailable, so this uses our curated catalogue — names are illustrative rather than exact venues."
+        )
+    elif plan.source == "mixed":
+        tradeoffs.append(
+            "Some stops come from our curated catalogue because live data for them wasn't available."
         )
     return tradeoffs
