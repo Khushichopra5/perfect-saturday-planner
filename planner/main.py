@@ -41,6 +41,9 @@ def _sse(event: dict[str, Any]) -> str:
 
 
 async def _stream(events: AsyncIterator[dict[str, Any]]) -> AsyncIterator[str]:
+    # An initial SSE comment flushes headers immediately so proxies don't buffer
+    # the trace until the first real event.
+    yield ": connected\n\n"
     async for event in events:
         yield _sse(event)
 
