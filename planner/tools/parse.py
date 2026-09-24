@@ -13,7 +13,6 @@ from typing import Any, Optional
 
 from ..data.mock_data import find_known_city
 from ..models import ClarifyingQuestion, Currency, Interest, MoodTag, Preferences
-from .cost import default_budget, format_money
 
 INTEREST_KEYWORDS: dict[Interest, tuple[str, ...]] = {
     "food": ("food", "foodie", "eat", "eating", "brunch", "lunch", "dinner", "cuisine", "restaurant", "street food", "snack"),
@@ -67,6 +66,22 @@ def _extract_mood_tags(text: str) -> list[MoodTag]:
     return found
 
 
+_NON_CITY_LEADING = {
+    "i", "we", "my", "the", "a", "an", "in", "on", "at", "just", "maybe", "something",
+    "tired", "relaxed", "energetic", "cozy", "hungry", "looking", "want", "wants", "need",
+    "plan", "planning", "saturday", "tomorrow", "today", "hey", "hi", "hello", "help",
+}
+
+
+def _looks_like_non_city(candidate: str) -> bool:
+    low = candidate.lower()
+    if low in _NON_CITY_LEADING:
+        return True
+    if any(low in keywords for keywords in MOOD_KEYWORDS.values()):
+        return True
+    return any(low in keywords for keywords in INTEREST_KEYWORDS.values())
+
+
 def _extract_city(raw: str, text: str) -> Optional[str]:
     known = find_known_city(text)
     if known:
@@ -74,6 +89,10 @@ def _extract_city(raw: str, text: str) -> Optional[str]:
     match = re.search(r"\b(?:in|at|around|near|from)\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)", raw)
     if match:
         return match.group(1).strip()
+    # "<City>, ..." at the very start — but not a mood/interest word ("Tired, ...").
+    leading = re.match(r"^([A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]+)?)\s*[,.;]", raw.strip())
+    if leading and not _looks_like_non_city(leading.group(1).strip()):
+        return leading.group(1).strip()
     trimmed = raw.strip()
     if re.fullmatch(r"[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?", trimmed):
         return trimmed
@@ -170,10 +189,8 @@ def parse_user_preferences(text: str) -> Preferences:
     currency: Currency = detected_currency or (known_city.currency if known_city else "INR")  # type: ignore[assignment]
     no_limit = bool(re.search(r"\b(no limit|unlimited|no budget|any budget|money is no object|whatever it costs)\b", normalized))
     budget_answered = budget is not None or no_limit
-    if budget is None:
-        assumptions.append(
-            f"No budget given — assumed a comfortable {format_money(default_budget(currency), currency)} range."
-        )
+    currency_explicit = detected_currency is not None or known_city is not None
+    # The "no budget" note is emitted by the agent after currency reconciliation.
 
     time_hours = _extract_time_hours(normalized)
     if time_hours is None:
@@ -206,6 +223,7 @@ def parse_user_preferences(text: str) -> Preferences:
         assumptions=assumptions,
         budget_answered=budget_answered,
         interests_explicit=interests_explicit,
+        currency_explicit=currency_explicit,
     )
 
 
@@ -269,10 +287,7 @@ def parse_structured(payload: dict[str, Any]) -> Preferences:
     known_city = find_known_city(city) if city else None
     detected_currency = _detect_currency(_normalize(str(payload)))
     currency: Currency = detected_currency or (known_city.currency if known_city else "INR")  # type: ignore[assignment]
-    if budget is None:
-        assumptions.append(
-            f"No budget given — assumed a comfortable {format_money(default_budget(currency), currency)} range."
-        )
+    currency_explicit = detected_currency is not None or known_city is not None
 
     return Preferences(
         raw=str(payload),
@@ -289,6 +304,7 @@ def parse_structured(payload: dict[str, Any]) -> Preferences:
         assumptions=assumptions,
         budget_answered=budget is not None,
         interests_explicit=interests_explicit,
+        currency_explicit=currency_explicit,
     )
 
 

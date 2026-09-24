@@ -65,6 +65,7 @@ class Preferences:
     assumptions: list[str] = field(default_factory=list)
     budget_answered: bool = False
     interests_explicit: bool = False
+    currency_explicit: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

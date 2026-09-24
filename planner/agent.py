@@ -23,7 +23,7 @@ from typing import Any, AsyncIterator, Optional
 from . import llm
 from .data.mock_data import build_mock_activities, build_mock_food
 from .models import PlaceCandidate, Preferences, TraceStep
-from .tools.cost import estimate_cost, format_money, normalize_budget
+from .tools.cost import default_budget, estimate_cost, format_money, normalize_budget
 from .tools.generate import build_tradeoffs, generate_final_plan, prune_plan
 from .tools.parse import detect_clarifications, parse_structured, parse_user_preferences
 from .tools.places import (
@@ -122,6 +122,19 @@ async def _continue(
                 f"Found {geo.name} ({geo.lat:.3f}, {geo.lon:.3f}) via {via}.",
                 int((time.monotonic() - t) * 1000),
             )
+
+    # If the user didn't state a currency, trust the country we geocoded.
+    if geo is not None and not prefs.currency_explicit and geo.currency != prefs.currency:
+        yield _trace("geocodeCity", "info", f"Using {geo.currency} for {geo.name}.")
+        prefs.currency = geo.currency
+
+    if prefs.budget is None:
+        yield _trace(
+            "parseUserPreferences",
+            "info",
+            f"No budget given — assumed a comfortable "
+            f"{format_money(default_budget(prefs.currency), prefs.currency)} range.",
+        )
 
     # Kick off both live lookups at once so the user waits for the slower one,
     # not their sum. Each still degrades to the curated catalogue on failure.
